@@ -19,6 +19,7 @@ const (
 	testInvalidThresholdValue = "abc"
 	testOverrideUserID        = int64(1)
 	testDifferentOverrideUser = int64(2)
+	testInvalidOrderingValue  = "500"
 )
 
 func TestThresholdOverridesAffectSharePriceMonitorDecision(t *testing.T) {
@@ -70,6 +71,80 @@ func TestThresholdProviderRejectsInvalidValueBeforeConfirmation(t *testing.T) {
 	// Assert
 	if err == nil {
 		t.Fatal("expected invalid threshold value to be rejected")
+	}
+}
+
+func TestThresholdProviderRejectsUnsupportedStaleOverride(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := storage.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	provider := thresholdProvider{repos: storage.NewRepositories(db), assetDecimals: 6}
+
+	// Act
+	_, err = provider.BuildSetConfirmation(ctx, testOverrideUserID, string(core.ModuleSharePriceLoss), moduleConfigKeyStaleUrgentAfter, "30m")
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected unsupported stale override to be rejected")
+	}
+}
+
+func TestThresholdProviderRejectsInvalidEffectiveSharePriceThresholds(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := storage.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	cfg := config.Config{Modules: map[string]config.ModuleConfig{
+		string(core.ModuleSharePriceLoss): {
+			moduleConfigKeyEnabled:       true,
+			moduleConfigKeyLossWarnBPS:   50,
+			moduleConfigKeyLossUrgentBPS: 100,
+		},
+	}}
+	provider := thresholdProvider{repos: storage.NewRepositories(db), config: cfg, assetDecimals: 6}
+
+	// Act
+	_, err = provider.BuildSetConfirmation(ctx, testOverrideUserID, string(core.ModuleSharePriceLoss), moduleConfigKeyLossWarnBPS, testInvalidOrderingValue)
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected invalid effective threshold ordering to be rejected")
+	}
+}
+
+func TestThresholdProviderRejectsInvalidEffectiveLiquidityThresholds(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := storage.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	cfg := config.Config{
+		Ethereum: config.EthereumConfig{AssetDecimals: 6},
+		Modules: map[string]config.ModuleConfig{
+			string(core.ModuleWithdrawLiquidity): {
+				moduleConfigKeyEnabled:                 true,
+				moduleConfigKeyIdleWarnThresholdUSDC:   "1000",
+				moduleConfigKeyIdleUrgentThresholdUSDC: "500",
+			},
+		},
+	}
+	provider := thresholdProvider{repos: storage.NewRepositories(db), config: cfg, assetDecimals: 6}
+
+	// Act
+	_, err = provider.BuildSetConfirmation(ctx, testOverrideUserID, string(core.ModuleWithdrawLiquidity), moduleConfigKeyIdleWarnThresholdUSDC, "100")
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected invalid effective liquidity threshold ordering to be rejected")
 	}
 }
 

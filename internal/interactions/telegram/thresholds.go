@@ -9,7 +9,6 @@ import (
 const (
 	thresholdKeyLossWarnBPS             = "loss_warn_bps"
 	thresholdKeyLossUrgentBPS           = "loss_urgent_bps"
-	thresholdKeyStaleUrgentAfter        = "stale_urgent_after"
 	thresholdKeyIdleWarnThresholdUSDC   = "idle_warn_threshold_usdc"
 	thresholdKeyIdleUrgentThresholdUSDC = "idle_urgent_threshold_usdc"
 	thresholdKeyChangeSeverity          = "change_severity"
@@ -34,18 +33,15 @@ type ThresholdConfirmation struct {
 
 var allowedThresholdKeys = map[core.MonitorModuleID]map[string]bool{
 	core.ModuleSharePriceLoss: {
-		thresholdKeyLossWarnBPS:      true,
-		thresholdKeyLossUrgentBPS:    true,
-		thresholdKeyStaleUrgentAfter: true,
+		thresholdKeyLossWarnBPS:   true,
+		thresholdKeyLossUrgentBPS: true,
 	},
 	core.ModuleWithdrawLiquidity: {
 		thresholdKeyIdleWarnThresholdUSDC:   true,
 		thresholdKeyIdleUrgentThresholdUSDC: true,
-		thresholdKeyStaleUrgentAfter:        true,
 	},
 	core.ModuleVaultState: {
-		thresholdKeyChangeSeverity:   true,
-		thresholdKeyStaleUrgentAfter: true,
+		thresholdKeyChangeSeverity: true,
 	},
 }
 
