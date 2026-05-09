@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -306,5 +307,13 @@ func TestConsumePendingConfirmationReturnsErrorWhenExpired(t *testing.T) {
 	// Assert
 	if err == nil {
 		t.Fatalf("expected expired pending confirmation error")
+	}
+	_, err = repos.ConsumePendingConfirmation(ctx, testPendingID, createdAt)
+	if err == nil {
+		t.Fatalf("expected consumed expired confirmation to be unavailable")
+	}
+	expected := fmt.Sprintf(errPendingConfirmationNotFound, testPendingID)
+	if err.Error() != expected {
+		t.Fatalf("expected consumed confirmation error %q, got %q", expected, err.Error())
 	}
 }
