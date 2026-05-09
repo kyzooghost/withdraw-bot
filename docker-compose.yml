@@ -3,7 +3,8 @@ services:
     build: .
     command: ["monitor", "--config", "/app/config.yaml"]
     env_file:
-      - .env
+      - path: .env
+        required: false
     volumes:
       - ./config/config.example.yaml:/app/config.yaml:ro
       - ./data:/app/data
