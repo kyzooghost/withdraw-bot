@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"io/fs"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/pressly/goose/v3"
@@ -13,6 +14,7 @@ import (
 const (
 	sqliteDialect = "sqlite3"
 	migrationsDir = "migrations"
+	maxOpenConns  = 1
 )
 
 //go:embed migrations/*.sql
@@ -23,16 +25,22 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
+	db.SetMaxOpenConns(maxOpenConns)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping sqlite database: %w", err)
 	}
-	goose.SetBaseFS(migrationsFS)
-	if err := goose.SetDialect(sqliteDialect); err != nil {
+	migrationsRoot, err := fs.Sub(migrationsFS, migrationsDir)
+	if err != nil {
 		db.Close()
-		return nil, fmt.Errorf("set migration dialect: %w", err)
+		return nil, fmt.Errorf("open embedded migrations: %w", err)
 	}
-	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
+	provider, err := goose.NewProvider(goose.DialectSQLite3, db, migrationsRoot)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create sqlite migration provider: %w", err)
+	}
+	if _, err := provider.Up(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply sqlite migrations: %w", err)
 	}

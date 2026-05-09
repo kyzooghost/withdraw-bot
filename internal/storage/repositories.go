@@ -33,10 +33,10 @@ func (repos Repositories) InsertMonitorResult(ctx context.Context, result core.M
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		string(result.ModuleID),
 		string(result.Status),
-		result.ObservedAt.Format(time.RFC3339Nano),
+		result.ObservedAt.UTC().Format(time.RFC3339Nano),
 		string(metrics),
 		string(findings),
-		createdAt.Format(time.RFC3339Nano),
+		createdAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return fmt.Errorf("insert monitor result for %s: %w", result.ModuleID, err)
@@ -55,7 +55,7 @@ func (repos Repositories) InsertEvent(ctx context.Context, eventType core.EventT
 		string(eventType),
 		message,
 		string(data),
-		createdAt.Format(time.RFC3339Nano),
+		createdAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return fmt.Errorf("insert event record: %w", err)

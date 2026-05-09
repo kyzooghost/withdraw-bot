@@ -8,6 +8,21 @@ import (
 	"withdraw-bot/internal/core"
 )
 
+const (
+	testEventMessage      = "risk condition detected"
+	testEventFieldKey     = "module"
+	testEventFieldValue   = "share_price_loss"
+	testEventFieldsJSON   = `{"module":"share_price_loss"}`
+	testMelbourneTimezone = "Australia/Melbourne"
+	testTableEvents       = "event_records"
+	testTableMonitor      = "monitor_snapshots"
+	testTableOverrides    = "threshold_overrides"
+	testTablePending      = "pending_confirmations"
+	testTableWithdrawals  = "withdrawal_attempts"
+	testUTCObservedAt     = "2026-05-08T15:00:00Z"
+	testUTCCreatedAt      = "2026-05-08T16:30:00Z"
+)
+
 func TestOpenAppliesMigrations(t *testing.T) {
 	// Arrange
 	ctx := context.Background()
@@ -20,8 +35,59 @@ func TestOpenAppliesMigrations(t *testing.T) {
 		t.Fatalf("expected open to apply migrations: %v", err)
 	}
 	defer db.Close()
-	if _, err := db.ExecContext(ctx, "SELECT COUNT(*) FROM monitor_snapshots"); err != nil {
-		t.Fatalf("expected monitor_snapshots table to exist: %v", err)
+	var name string
+	if err := db.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", testTableMonitor).Scan(&name); err != nil {
+		t.Fatalf("expected %s table to exist: %v", testTableMonitor, err)
+	}
+	if name != testTableMonitor {
+		t.Fatalf("expected table name %q, got %q", testTableMonitor, name)
+	}
+}
+
+func TestOpenCreatesAllStorageTables(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	tables := []string{
+		testTableMonitor,
+		testTableEvents,
+		testTableOverrides,
+		testTablePending,
+		testTableWithdrawals,
+	}
+
+	// Act
+	db, err := Open(ctx, ":memory:")
+
+	// Assert
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	for _, table := range tables {
+		var name string
+		if err := db.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&name); err != nil {
+			t.Fatalf("expected %s table to exist: %v", table, err)
+		}
+		if name != table {
+			t.Fatalf("expected table name %q, got %q", table, name)
+		}
+	}
+}
+
+func TestOpenLimitsPoolToSingleConnection(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+
+	// Act
+	db, err := Open(ctx, ":memory:")
+
+	// Assert
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	if db.Stats().MaxOpenConnections != 1 {
+		t.Fatalf("expected max open connections 1, got %d", db.Stats().MaxOpenConnections)
 	}
 }
 
@@ -54,5 +120,113 @@ func TestInsertMonitorResultPersistsModuleStatus(t *testing.T) {
 	}
 	if status != string(core.MonitorStatusWarn) {
 		t.Fatalf("expected status %q, got %q", core.MonitorStatusWarn, status)
+	}
+}
+
+func TestInsertMonitorResultStoresTimestampsInUTC(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	repos := NewRepositories(db)
+	location, err := time.LoadLocation(testMelbourneTimezone)
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	observedAt := time.Date(2026, 5, 9, 1, 0, 0, 0, location)
+	createdAt := time.Date(2026, 5, 9, 2, 30, 0, 0, location)
+	result := core.MonitorResult{
+		ModuleID:   core.ModuleSharePriceLoss,
+		Status:     core.MonitorStatusWarn,
+		ObservedAt: observedAt,
+	}
+
+	// Act
+	err = repos.InsertMonitorResult(ctx, result, createdAt)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("insert monitor result: %v", err)
+	}
+	var storedObservedAt string
+	var storedCreatedAt string
+	if err := db.QueryRowContext(ctx, "SELECT observed_at, created_at FROM monitor_snapshots WHERE module_id = ?", string(core.ModuleSharePriceLoss)).Scan(&storedObservedAt, &storedCreatedAt); err != nil {
+		t.Fatalf("query monitor result: %v", err)
+	}
+	if storedObservedAt != testUTCObservedAt {
+		t.Fatalf("expected observed_at %q, got %q", testUTCObservedAt, storedObservedAt)
+	}
+	if storedCreatedAt != testUTCCreatedAt {
+		t.Fatalf("expected created_at %q, got %q", testUTCCreatedAt, storedCreatedAt)
+	}
+}
+
+func TestInsertEventPersistsRecord(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	repos := NewRepositories(db)
+	createdAt := time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)
+	fields := map[string]string{testEventFieldKey: testEventFieldValue}
+
+	// Act
+	err = repos.InsertEvent(ctx, core.EventWarning, testEventMessage, fields, createdAt)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	var eventType string
+	var message string
+	var fieldsJSON string
+	if err := db.QueryRowContext(ctx, "SELECT event_type, message, fields_json FROM event_records WHERE event_type = ?", string(core.EventWarning)).Scan(&eventType, &message, &fieldsJSON); err != nil {
+		t.Fatalf("query event: %v", err)
+	}
+	if eventType != string(core.EventWarning) {
+		t.Fatalf("expected event type %q, got %q", core.EventWarning, eventType)
+	}
+	if message != testEventMessage {
+		t.Fatalf("expected message %q, got %q", testEventMessage, message)
+	}
+	if fieldsJSON != testEventFieldsJSON {
+		t.Fatalf("expected fields JSON, got %q", fieldsJSON)
+	}
+}
+
+func TestInsertEventStoresCreatedAtInUTC(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	repos := NewRepositories(db)
+	location, err := time.LoadLocation(testMelbourneTimezone)
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	createdAt := time.Date(2026, 5, 9, 2, 30, 0, 0, location)
+
+	// Act
+	err = repos.InsertEvent(ctx, core.EventWarning, testEventMessage, nil, createdAt)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	var storedCreatedAt string
+	if err := db.QueryRowContext(ctx, "SELECT created_at FROM event_records WHERE event_type = ?", string(core.EventWarning)).Scan(&storedCreatedAt); err != nil {
+		t.Fatalf("query event: %v", err)
+	}
+	if storedCreatedAt != testUTCCreatedAt {
+		t.Fatalf("expected created_at %q, got %q", testUTCCreatedAt, storedCreatedAt)
 	}
 }
