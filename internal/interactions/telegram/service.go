@@ -57,7 +57,7 @@ type WithdrawService interface {
 
 type ThresholdService interface {
 	List(ctx context.Context) (string, error)
-	BuildSetConfirmation(ctx context.Context, module string, key string, value string) (string, error)
+	BuildSetConfirmation(ctx context.Context, userID int64, module string, key string, value string) (string, error)
 	Confirm(ctx context.Context, id string) (string, error)
 }
 
@@ -137,14 +137,14 @@ func (service Service) HandleCommand(ctx context.Context, chatID int64, userID i
 		}
 		return interactions.CommandResponse{}, err
 	}
-	response, err := service.dispatch(ctx, parsed)
+	response, err := service.dispatch(ctx, parsed, userID)
 	if err != nil {
 		return interactions.CommandResponse{}, err
 	}
 	return interactions.CommandResponse{ChatID: chatID, Text: service.boundResponse(response)}, nil
 }
 
-func (service Service) dispatch(ctx context.Context, command ParsedCommand) (string, error) {
+func (service Service) dispatch(ctx context.Context, command ParsedCommand, userID int64) (string, error) {
 	switch command.Name {
 	case string(core.CommandStats):
 		return service.stats(ctx)
@@ -155,7 +155,7 @@ func (service Service) dispatch(ctx context.Context, command ParsedCommand) (str
 	case string(core.CommandThresholds):
 		return service.thresholds(ctx)
 	case string(core.CommandThresholdSet):
-		return service.thresholdSet(ctx, command.Args)
+		return service.thresholdSet(ctx, command.Args, userID)
 	case string(core.CommandLogs):
 		return service.logs(ctx, command.Args)
 	case string(core.CommandHelp), "":
@@ -203,14 +203,14 @@ func (service Service) thresholds(ctx context.Context) (string, error) {
 	return service.Thresholds.List(ctx)
 }
 
-func (service Service) thresholdSet(ctx context.Context, args []string) (string, error) {
+func (service Service) thresholdSet(ctx context.Context, args []string, userID int64) (string, error) {
 	if len(args) != 4 || args[0] != thresholdSetSubcommand {
 		return responseThresholdSetUsage, nil
 	}
 	if service.Thresholds == nil {
 		return responseThresholdSetUnavailable, nil
 	}
-	return service.Thresholds.BuildSetConfirmation(ctx, args[1], args[2], args[3])
+	return service.Thresholds.BuildSetConfirmation(ctx, userID, args[1], args[2], args[3])
 }
 
 func (service Service) logs(ctx context.Context, args []string) (string, error) {

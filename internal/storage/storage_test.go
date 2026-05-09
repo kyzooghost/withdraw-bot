@@ -3,10 +3,14 @@ package storage
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"testing"
 	"time"
 
 	"withdraw-bot/internal/core"
+	"withdraw-bot/internal/withdraw"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 const (
@@ -27,6 +31,8 @@ const (
 	testPendingID              = "threshold:share_price_loss:loss_warn_bps:1"
 	testPendingKind            = "threshold"
 	testPendingPayload         = `{"module_id":"share_price_loss","key":"loss_warn_bps","value":"75"}`
+	testWithdrawalAttemptID    = "20260509T010000.000000000Z-urgent-withdraw_liquidity-idle_liquidity"
+	testWithdrawalTxHash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
 	testTableEvents            = "event_records"
 	testIndexEventsTime        = "idx_event_records_created_at_id"
 	testTableMonitor           = "monitor_snapshots"
@@ -391,6 +397,66 @@ func TestListRecentEventsClampsLimitToRange(t *testing.T) {
 	expectedNewestMessage := fmt.Sprintf(testEventClampMessage, maxRecentEventsLimit)
 	if minResult[0].Message != expectedNewestMessage {
 		t.Fatalf("expected low limit to return newest message %q, got %q", expectedNewestMessage, minResult[0].Message)
+	}
+}
+
+func TestInsertWithdrawalAttemptPersistsSubmittedAttempt(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	repos := NewRepositories(db)
+	at := time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)
+	attempt := withdraw.WithdrawalAttempt{
+		ID: testWithdrawalAttemptID,
+		Trigger: withdraw.WithdrawalTrigger{
+			Kind:       withdraw.TriggerKindUrgent,
+			ModuleID:   core.ModuleWithdrawLiquidity,
+			FindingKey: core.FindingIdleLiquidity,
+		},
+		Status:             withdraw.WithdrawalStatusSubmitted,
+		TxHash:             common.HexToHash(testWithdrawalTxHash),
+		Nonce:              7,
+		GasUnits:           21000,
+		FeeCaps:            withdraw.FeeCaps{MaxFeePerGas: big.NewInt(100), MaxPriorityFeePerGas: big.NewInt(2)},
+		ExpectedAssetUnits: big.NewInt(12345),
+		SimulationSuccess:  true,
+		CreatedAt:          at,
+		UpdatedAt:          at,
+	}
+
+	// Act
+	err = repos.InsertWithdrawalAttempt(ctx, attempt)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("insert withdrawal attempt: %v", err)
+	}
+	var status string
+	var triggerModuleID string
+	var txHash string
+	var maxFeePerGas string
+	var expectedAssetUnits string
+	if err := db.QueryRowContext(ctx, `SELECT status, trigger_module_id, tx_hash, max_fee_per_gas_wei, expected_asset_units FROM withdrawal_attempts WHERE id = ?`, testWithdrawalAttemptID).Scan(&status, &triggerModuleID, &txHash, &maxFeePerGas, &expectedAssetUnits); err != nil {
+		t.Fatalf("query withdrawal attempt: %v", err)
+	}
+	if status != string(withdraw.WithdrawalStatusSubmitted) {
+		t.Fatalf("expected status %q, got %q", withdraw.WithdrawalStatusSubmitted, status)
+	}
+	if triggerModuleID != string(core.ModuleWithdrawLiquidity) {
+		t.Fatalf("expected trigger module %q, got %q", core.ModuleWithdrawLiquidity, triggerModuleID)
+	}
+	if txHash != testWithdrawalTxHash {
+		t.Fatalf("expected tx hash %q, got %q", testWithdrawalTxHash, txHash)
+	}
+	if maxFeePerGas != "100" {
+		t.Fatalf("expected max fee per gas, got %q", maxFeePerGas)
+	}
+	if expectedAssetUnits != "12345" {
+		t.Fatalf("expected asset units, got %q", expectedAssetUnits)
 	}
 }
 

@@ -11,9 +11,12 @@ import (
 	"time"
 
 	"withdraw-bot/internal/config"
+	"withdraw-bot/internal/core"
 	"withdraw-bot/internal/ethereum"
+	telegramcmd "withdraw-bot/internal/interactions/telegram"
 	"withdraw-bot/internal/monitor/modules/morpho"
 	"withdraw-bot/internal/signer"
+	"withdraw-bot/internal/storage"
 
 	geth "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -21,7 +24,15 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const testPrimaryRPCURL = "https://rpc.example/private-token"
+const (
+	testPrimaryRPCURL       = "https://rpc.example/private-token"
+	testTelegramChatID      = 100
+	testTelegramAllowedUser = 1
+	testTelegramDeniedUser  = 2
+	testRuntimeLogMessage   = "warning event from runtime"
+	testThresholdValue      = "75"
+	testThresholdConfirmID  = "threshold:share_price_loss:loss_warn_bps:1"
+)
 
 func TestRunConfigCheckReturnsChainIDMismatch(t *testing.T) {
 	// Arrange
@@ -268,6 +279,87 @@ func TestBuildModulesRejectsUnknownEnabledModule(t *testing.T) {
 	}
 }
 
+func TestBuildMonitorServicesWiresLogsProvider(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	runtime, db := buildTestRuntimeWithMonitorServices(t, ctx)
+	telegramService := runtimeTelegramService(t, runtime)
+	repos := storage.NewRepositories(db)
+	if err := repos.InsertEvent(ctx, core.EventWarning, testRuntimeLogMessage, nil, time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+
+	// Act
+	result, err := telegramService.HandleCommand(ctx, testTelegramChatID, testTelegramAllowedUser, string(core.CommandLogs))
+
+	// Assert
+	if err != nil {
+		t.Fatalf("handle logs command: %v", err)
+	}
+	if !strings.Contains(result.Text, testRuntimeLogMessage) {
+		t.Fatalf("expected logs response to include event message, got %q", result.Text)
+	}
+}
+
+func TestBuildMonitorServicesWiresThresholdProvider(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	runtime, db := buildTestRuntimeWithMonitorServices(t, ctx)
+	telegramService := runtimeTelegramService(t, runtime)
+	repos := storage.NewRepositories(db)
+
+	// Act
+	result, err := telegramService.HandleCommand(ctx, testTelegramChatID, testTelegramAllowedUser, string(core.CommandThresholdSet)+" set share_price_loss loss_warn_bps "+testThresholdValue)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("handle threshold set command: %v", err)
+	}
+	if !strings.Contains(result.Text, testThresholdConfirmID) {
+		t.Fatalf("expected threshold confirmation id, got %q", result.Text)
+	}
+
+	// Act
+	result, err = telegramService.HandleCommand(ctx, testTelegramChatID, testTelegramAllowedUser, string(core.CommandConfirm)+" "+testThresholdConfirmID)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("handle threshold confirm command: %v", err)
+	}
+	if !strings.Contains(result.Text, testThresholdValue) {
+		t.Fatalf("expected threshold confirmation response, got %q", result.Text)
+	}
+	overrides, err := repos.ListThresholdOverrides(ctx)
+	if err != nil {
+		t.Fatalf("list threshold overrides: %v", err)
+	}
+	if len(overrides) != 1 || overrides[0].Value != testThresholdValue {
+		t.Fatalf("expected threshold override value %q, got %+v", testThresholdValue, overrides)
+	}
+}
+
+func TestBuildMonitorServicesWiresSecurityEventRecorder(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	runtime, db := buildTestRuntimeWithMonitorServices(t, ctx)
+	telegramService := runtimeTelegramService(t, runtime)
+
+	// Act
+	_, err := telegramService.HandleCommand(ctx, testTelegramChatID, testTelegramDeniedUser, string(core.CommandStats))
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected authorization error")
+	}
+	events, err := storage.NewRepositories(db).ListRecentEvents(ctx, false, 10)
+	if err != nil {
+		t.Fatalf("list recent events: %v", err)
+	}
+	if len(events) != 1 || events[0].EventType != core.EventSecurity {
+		t.Fatalf("expected security event, got %+v", events)
+	}
+}
+
 type fakeChainClient struct {
 	chainID *big.Int
 }
@@ -401,6 +493,52 @@ func testRuntimeSecrets() config.Secrets {
 		PrivateKey:    "private",
 		TelegramToken: "telegram",
 		PrimaryRPCURL: testPrimaryRPCURL,
+	}
+}
+
+func buildTestRuntimeWithMonitorServices(t *testing.T, ctx context.Context) (Runtime, *sql.DB) {
+	t.Helper()
+	var db *sql.DB
+	withRuntimeDependencies(t, runtimeDependencies{
+		openStorage: func(ctx context.Context, path string) (*sql.DB, error) {
+			var err error
+			db, err = storage.Open(ctx, ":memory:")
+			return db, err
+		},
+		newTelegramBot: func(token string) (*tgbotapi.BotAPI, error) {
+			return &tgbotapi.BotAPI{Token: token}, nil
+		},
+	})
+	cfg := testRuntimeConfig()
+	cfg.App.DataDir = t.TempDir()
+	cfg.Telegram = config.TelegramConfig{ChatID: testTelegramChatID, AllowedUserIDs: []int64{testTelegramAllowedUser}}
+	cfg.Logs = config.LogConfig{FilePath: cfg.App.DataDir + "/withdraw-bot.log", MaxSizeMB: 1, MaxBackups: 1, MaxAgeDays: 1}
+	runtime := Runtime{
+		Config:  cfg,
+		Secrets: testRuntimeSecrets(),
+		Signer:  fakeRuntimeSigner{address: common.HexToAddress("0x0000000000000000000000000000000000000002")},
+		Submitter: ethereum.NewMultiClient(fakeRPCClient{
+			chainID: big.NewInt(1),
+		}, nil),
+	}
+	cleanup, err := buildMonitorServices(ctx, &runtime)
+	if err != nil {
+		t.Fatalf("build monitor services: %v", err)
+	}
+	t.Cleanup(cleanup)
+	return runtime, db
+}
+
+func runtimeTelegramService(t *testing.T, runtime Runtime) *telegramcmd.Service {
+	t.Helper()
+	switch telegramService := runtime.Telegram.(type) {
+	case *telegramcmd.Service:
+		return telegramService
+	case telegramcmd.Service:
+		return &telegramService
+	default:
+		t.Fatalf("expected telegram service, got %T", runtime.Telegram)
+		return nil
 	}
 }
 

@@ -464,7 +464,7 @@ func (service fakeThresholdService) List(ctx context.Context) (string, error) {
 	return service.list, nil
 }
 
-func (service fakeThresholdService) BuildSetConfirmation(ctx context.Context, module string, key string, value string) (string, error) {
+func (service fakeThresholdService) BuildSetConfirmation(ctx context.Context, userID int64, module string, key string, value string) (string, error) {
 	return service.confirmation, nil
 }
 

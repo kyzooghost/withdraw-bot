@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"time"
 
 	"withdraw-bot/internal/core"
+	"withdraw-bot/internal/withdraw"
 )
 
 const (
@@ -18,6 +20,7 @@ const (
 	operationDecodeEventFields     = "decode event fields"
 	operationDeleteConfirmation    = "delete pending confirmation"
 	operationInsertConfirmation    = "insert pending confirmation"
+	operationInsertWithdrawal      = "insert withdrawal attempt"
 	operationListEvent             = "list event record"
 	operationListRecentEvents      = "list recent events"
 	operationListThresholdOverride = "list threshold override"
@@ -34,8 +37,13 @@ const (
 	querySelectConfirmation = `SELECT id, kind, payload_json, requested_by_user_id, expires_at, created_at FROM pending_confirmations WHERE id = ?`
 	queryDeleteConfirmation = `DELETE FROM pending_confirmations WHERE id = ?`
 	queryInsertConfirmation = `INSERT INTO pending_confirmations(id, kind, payload_json, requested_by_user_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`
-	queryListThresholds     = `SELECT module_id, key, value, updated_by_user_id, updated_at FROM threshold_overrides ORDER BY module_id, key`
-	queryUpsertThreshold    = `INSERT INTO threshold_overrides(module_id, key, value, updated_by_user_id, updated_at)
+	queryInsertWithdrawal   = `INSERT INTO withdrawal_attempts(
+		 id, trigger_kind, trigger_module_id, trigger_finding_key, status, tx_hash, nonce, gas_units,
+		 max_fee_per_gas_wei, max_priority_fee_per_gas_wei, expected_asset_units, simulation_success,
+		 failure_reason, created_at, updated_at
+	 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	queryListThresholds  = `SELECT module_id, key, value, updated_by_user_id, updated_at FROM threshold_overrides ORDER BY module_id, key`
+	queryUpsertThreshold = `INSERT INTO threshold_overrides(module_id, key, value, updated_by_user_id, updated_at)
 		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(module_id, key) DO UPDATE SET
 		 value = excluded.value,
@@ -125,6 +133,10 @@ func (repos Repositories) InsertEvent(ctx context.Context, eventType core.EventT
 	return nil
 }
 
+func (repos Repositories) Record(ctx context.Context, eventType core.EventType, message string, fields map[string]string, at time.Time) error {
+	return repos.InsertEvent(ctx, eventType, message, fields, at)
+}
+
 func (repos Repositories) ListRecentEvents(ctx context.Context, includeInfo bool, limit int) ([]EventRecord, error) {
 	clampedLimit := clampRecentEventsLimit(limit)
 	var rows *sql.Rows
@@ -159,6 +171,36 @@ func (repos Repositories) ListRecentEvents(ctx context.Context, includeInfo bool
 		return nil, fmt.Errorf(operationListRecentEvents+": %w", err)
 	}
 	return events, nil
+}
+
+func (repos Repositories) InsertWithdrawalAttempt(ctx context.Context, attempt withdraw.WithdrawalAttempt) error {
+	simulationSuccess := 0
+	if attempt.SimulationSuccess {
+		simulationSuccess = 1
+	}
+	_, err := repos.DB.ExecContext(
+		ctx,
+		queryInsertWithdrawal,
+		attempt.ID,
+		string(attempt.Trigger.Kind),
+		string(attempt.Trigger.ModuleID),
+		string(attempt.Trigger.FindingKey),
+		string(attempt.Status),
+		attempt.TxHash.String(),
+		int64(attempt.Nonce),
+		int64(attempt.GasUnits),
+		nullableBigString(attempt.FeeCaps.MaxFeePerGas),
+		nullableBigString(attempt.FeeCaps.MaxPriorityFeePerGas),
+		nullableBigString(attempt.ExpectedAssetUnits),
+		simulationSuccess,
+		attempt.FailureReason,
+		attempt.CreatedAt.UTC().Format(time.RFC3339Nano),
+		attempt.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf(operationInsertWithdrawal+": %w", err)
+	}
+	return nil
 }
 
 func (repos Repositories) UpsertThresholdOverride(ctx context.Context, moduleID string, key string, value string, userID int64, at time.Time) error {
@@ -304,4 +346,11 @@ func clampRecentEventsLimit(limit int) int {
 		return maxRecentEventsLimit
 	}
 	return limit
+}
+
+func nullableBigString(value *big.Int) any {
+	if value == nil {
+		return nil
+	}
+	return value.String()
 }

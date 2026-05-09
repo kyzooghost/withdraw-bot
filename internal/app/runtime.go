@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -11,8 +12,10 @@ import (
 	"time"
 
 	"withdraw-bot/internal/config"
+	"withdraw-bot/internal/core"
 	"withdraw-bot/internal/ethereum"
 	"withdraw-bot/internal/interactions/telegram"
+	"withdraw-bot/internal/logging"
 	"withdraw-bot/internal/monitor"
 	morphovault "withdraw-bot/internal/morpho"
 	"withdraw-bot/internal/reports"
@@ -25,8 +28,10 @@ import (
 )
 
 const (
-	databaseFileName  = "withdraw-bot.sqlite"
-	errInvalidAddress = "%s must be a valid Ethereum address"
+	databaseFileName                 = "withdraw-bot.sqlite"
+	errCreateLogDir                  = "create log dir"
+	errInvalidAddress                = "%s must be a valid Ethereum address"
+	runtimeMonitorServicesReadyEvent = "monitor services initialized"
 )
 
 type runtimeDependencies struct {
@@ -116,11 +121,17 @@ func buildMonitorServices(ctx context.Context, runtime *Runtime) (func(), error)
 	if err := os.MkdirAll(runtime.Config.App.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
-	db, err := runtimeDeps.openStorage(ctx, filepath.Join(runtime.Config.App.DataDir, databaseFileName))
+	logCleanup, err := setupRuntimeLogger(runtime.Config.Logs)
 	if err != nil {
 		return nil, err
 	}
+	db, err := runtimeDeps.openStorage(ctx, filepath.Join(runtime.Config.App.DataDir, databaseFileName))
+	if err != nil {
+		logCleanup()
+		return nil, err
+	}
 	cleanup := func() {
+		logCleanup()
 		db.Close()
 	}
 	repos := storage.NewRepositories(db)
@@ -150,18 +161,46 @@ func buildMonitorServices(ctx context.Context, runtime *Runtime) (func(), error)
 		Signer:             runtime.Signer,
 		ChainID:            big.NewInt(runtime.Config.Ethereum.ChainID),
 		Submitter:          runtime.Submitter,
+		Repository:         repos,
+		Clock:              core.SystemClock{},
 		GasPolicy:          withdraw.GasPolicy{BumpBPS: runtime.Config.Gas.FeeBumpBPS, MaxFeeCap: maxFeeCap, MaxTipCap: maxTipCap},
 		GasLimitBufferBPS:  runtime.Config.Gas.GasLimitBufferBPS,
 		ReplacementTimeout: replacementTimeout,
 	}
-	runtime.Monitor = monitorService
-	runtime.Telegram = telegram.Service{
+	telegramService := &telegram.Service{
 		Bot:           bot,
 		Authorization: telegram.Authorization{ChatID: runtime.Config.Telegram.ChatID, AllowedUserIDs: allowedUserIDs(runtime.Config.Telegram.AllowedUserIDs)},
 		Reports:       reportProvider{monitor: monitorService},
 		Withdraw:      withdrawService,
+		Thresholds:    thresholdProvider{repos: repos},
+		Logs:          eventLogProvider{repos: repos},
+		Events:        repos,
 	}
+	runtime.Monitor = monitorService
+	runtime.Telegram = telegramService
+	slog.InfoContext(ctx, runtimeMonitorServicesReadyEvent)
 	return cleanup, nil
+}
+
+func setupRuntimeLogger(logConfig config.LogConfig) (func(), error) {
+	if logConfig.FilePath == "" {
+		return func() {}, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(logConfig.FilePath), 0o755); err != nil {
+		return nil, fmt.Errorf("%s: %w", errCreateLogDir, err)
+	}
+	logger, closer := logging.New(logging.Config{
+		FilePath:   logConfig.FilePath,
+		MaxSizeMB:  logConfig.MaxSizeMB,
+		MaxBackups: logConfig.MaxBackups,
+		MaxAgeDays: logConfig.MaxAgeDays,
+	})
+	previous := slog.Default()
+	slog.SetDefault(logger)
+	return func() {
+		slog.SetDefault(previous)
+		_ = closer.Close()
+	}, nil
 }
 
 func parseAddress(name string, value string) (common.Address, error) {
