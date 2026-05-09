@@ -27,10 +27,10 @@ const (
 	operationParseOverrideUpdated  = "parse threshold override updated_at"
 	operationQueryConfirmation     = "query pending confirmation"
 	operationUpsertThreshold       = "upsert threshold override"
-	queryListRecentEvents          = `SELECT event_type, message, fields_json, created_at FROM event_records ORDER BY created_at DESC LIMIT ?`
+	queryListRecentEvents          = `SELECT event_type, message, fields_json, created_at FROM event_records ORDER BY created_at DESC, id DESC LIMIT ?`
 	queryListRecentEventsFiltered  = `SELECT event_type, message, fields_json, created_at FROM event_records
 		 WHERE event_type IN (?, ?, ?, ?)
-		 ORDER BY created_at DESC LIMIT ?`
+		 ORDER BY created_at DESC, id DESC LIMIT ?`
 	querySelectConfirmation = `SELECT id, kind, payload_json, requested_by_user_id, expires_at, created_at FROM pending_confirmations WHERE id = ?`
 	queryDeleteConfirmation = `DELETE FROM pending_confirmations WHERE id = ?`
 	queryInsertConfirmation = `INSERT INTO pending_confirmations(id, kind, payload_json, requested_by_user_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`

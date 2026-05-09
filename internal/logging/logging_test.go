@@ -2,17 +2,19 @@ package logging
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
 const (
-	testLogFileName = "withdraw-bot.log"
-	testLogMessage  = "logger configured"
-	testLogKey      = "module"
-	testLogValue    = "share_price_loss"
+	testLogFileName     = "withdraw-bot.log"
+	testLogMessage      = "logger configured"
+	testLogMessageField = "msg"
+	testLogSourceField  = "source"
+	testLogKey          = "module"
+	testLogValue        = "share_price_loss"
 )
 
 func TestNewWritesJSONLogToFile(t *testing.T) {
@@ -31,10 +33,17 @@ func TestNewWritesJSONLogToFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read log file: %v", err)
 	}
-	if !strings.Contains(string(data), `"msg":"`+testLogMessage+`"`) {
-		t.Fatalf("expected log message, got %q", string(data))
+	var entry map[string]any
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("decode log JSON: %v", err)
 	}
-	if !strings.Contains(string(data), `"`+testLogKey+`":"`+testLogValue+`"`) {
-		t.Fatalf("expected log field, got %q", string(data))
+	if entry[testLogMessageField] != testLogMessage {
+		t.Fatalf("expected log message %q, got %v", testLogMessage, entry[testLogMessageField])
+	}
+	if entry[testLogKey] != testLogValue {
+		t.Fatalf("expected log field %q, got %v", testLogValue, entry[testLogKey])
+	}
+	if _, ok := entry[testLogSourceField].(map[string]any); !ok {
+		t.Fatalf("expected source field, got %v", entry[testLogSourceField])
 	}
 }

@@ -10,28 +10,31 @@ import (
 )
 
 const (
-	testEventMessage      = "risk condition detected"
-	testEventFieldKey     = "module"
-	testEventFieldValue   = "share_price_loss"
-	testEventFieldsJSON   = `{"module":"share_price_loss"}`
-	testEventClampMessage = "warning event %02d"
-	testEventInfoMessage  = "monitor tick completed"
-	testEventWarnMessage  = "warning event"
-	testEventErrorMessage = "error event"
-	testMelbourneTimezone = "Australia/Melbourne"
-	testOverrideKey       = "loss_warn_bps"
-	testOverrideOldValue  = "50"
-	testOverrideNewValue  = "75"
-	testPendingID         = "threshold:share_price_loss:loss_warn_bps:1"
-	testPendingKind       = "threshold"
-	testPendingPayload    = `{"module_id":"share_price_loss","key":"loss_warn_bps","value":"75"}`
-	testTableEvents       = "event_records"
-	testTableMonitor      = "monitor_snapshots"
-	testTableOverrides    = "threshold_overrides"
-	testTablePending      = "pending_confirmations"
-	testTableWithdrawals  = "withdrawal_attempts"
-	testUTCObservedAt     = "2026-05-08T15:00:00Z"
-	testUTCCreatedAt      = "2026-05-08T16:30:00Z"
+	testEventMessage           = "risk condition detected"
+	testEventFieldKey          = "module"
+	testEventFieldValue        = "share_price_loss"
+	testEventFieldsJSON        = `{"module":"share_price_loss"}`
+	testEventClampMessage      = "warning event %02d"
+	testEventInfoMessage       = "monitor tick completed"
+	testEventWarnMessage       = "warning event"
+	testEventErrorMessage      = "error event"
+	testEventSecurityMessage   = "security event"
+	testEventWithdrawalMessage = "withdrawal event"
+	testMelbourneTimezone      = "Australia/Melbourne"
+	testOverrideKey            = "loss_warn_bps"
+	testOverrideOldValue       = "50"
+	testOverrideNewValue       = "75"
+	testPendingID              = "threshold:share_price_loss:loss_warn_bps:1"
+	testPendingKind            = "threshold"
+	testPendingPayload         = `{"module_id":"share_price_loss","key":"loss_warn_bps","value":"75"}`
+	testTableEvents            = "event_records"
+	testIndexEventsTime        = "idx_event_records_created_at_id"
+	testTableMonitor           = "monitor_snapshots"
+	testTableOverrides         = "threshold_overrides"
+	testTablePending           = "pending_confirmations"
+	testTableWithdrawals       = "withdrawal_attempts"
+	testUTCObservedAt          = "2026-05-08T15:00:00Z"
+	testUTCCreatedAt           = "2026-05-08T16:30:00Z"
 )
 
 func TestOpenAppliesMigrations(t *testing.T) {
@@ -82,6 +85,27 @@ func TestOpenCreatesAllStorageTables(t *testing.T) {
 		if name != table {
 			t.Fatalf("expected table name %q, got %q", table, name)
 		}
+	}
+}
+
+func TestOpenCreatesRecentEventIndex(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+
+	// Act
+	db, err := Open(ctx, ":memory:")
+
+	// Assert
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	var name string
+	if err := db.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", testIndexEventsTime).Scan(&name); err != nil {
+		t.Fatalf("expected %s index to exist: %v", testIndexEventsTime, err)
+	}
+	if name != testIndexEventsTime {
+		t.Fatalf("expected index name %q, got %q", testIndexEventsTime, name)
 	}
 }
 
@@ -251,15 +275,20 @@ func TestListRecentEventsExcludesInfoByDefault(t *testing.T) {
 	}
 	defer db.Close()
 	repos := NewRepositories(db)
-	older := time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)
-	newer := time.Date(2026, 5, 9, 2, 0, 0, 0, time.UTC)
-	if err := repos.InsertEvent(ctx, core.EventInfo, testEventInfoMessage, nil, newer); err != nil {
+	at := time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)
+	if err := repos.InsertEvent(ctx, core.EventInfo, testEventInfoMessage, nil, at.Add(5*time.Minute)); err != nil {
 		t.Fatalf("insert info event: %v", err)
 	}
-	if err := repos.InsertEvent(ctx, core.EventWarning, testEventWarnMessage, map[string]string{testEventFieldKey: testEventFieldValue}, older); err != nil {
+	if err := repos.InsertEvent(ctx, core.EventWarning, testEventWarnMessage, map[string]string{testEventFieldKey: testEventFieldValue}, at.Add(time.Minute)); err != nil {
 		t.Fatalf("insert warning event: %v", err)
 	}
-	if err := repos.InsertEvent(ctx, core.EventError, testEventErrorMessage, nil, newer); err != nil {
+	if err := repos.InsertEvent(ctx, core.EventSecurity, testEventSecurityMessage, nil, at.Add(2*time.Minute)); err != nil {
+		t.Fatalf("insert security event: %v", err)
+	}
+	if err := repos.InsertEvent(ctx, core.EventWithdrawal, testEventWithdrawalMessage, nil, at.Add(3*time.Minute)); err != nil {
+		t.Fatalf("insert withdrawal event: %v", err)
+	}
+	if err := repos.InsertEvent(ctx, core.EventError, testEventErrorMessage, nil, at.Add(4*time.Minute)); err != nil {
 		t.Fatalf("insert error event: %v", err)
 	}
 
@@ -270,17 +299,23 @@ func TestListRecentEventsExcludesInfoByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list recent events: %v", err)
 	}
-	if len(result) != 2 {
-		t.Fatalf("expected two non-info events, got %d", len(result))
+	if len(result) != 4 {
+		t.Fatalf("expected four non-info events, got %d", len(result))
 	}
 	if result[0].EventType != core.EventError {
 		t.Fatalf("expected newest error first, got %s", result[0].EventType)
 	}
-	if result[1].EventType != core.EventWarning {
-		t.Fatalf("expected warning second, got %s", result[1].EventType)
+	if result[1].EventType != core.EventWithdrawal {
+		t.Fatalf("expected withdrawal second, got %s", result[1].EventType)
 	}
-	if result[1].Fields[testEventFieldKey] != testEventFieldValue {
-		t.Fatalf("expected decoded event fields, got %v", result[1].Fields)
+	if result[2].EventType != core.EventSecurity {
+		t.Fatalf("expected security third, got %s", result[2].EventType)
+	}
+	if result[3].EventType != core.EventWarning {
+		t.Fatalf("expected warning fourth, got %s", result[3].EventType)
+	}
+	if result[3].Fields[testEventFieldKey] != testEventFieldValue {
+		t.Fatalf("expected decoded event fields, got %v", result[3].Fields)
 	}
 }
 
