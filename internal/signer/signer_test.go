@@ -9,11 +9,12 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
+const testPrivateKey = "0x0123456789012345678901234567890123456789012345678901234567890123"
+
 func TestPrivateKeyServiceSignsTransactionForExpectedAddress(t *testing.T) {
 	// Arrange
 	ctx := context.Background()
-	privateKey := "0x0123456789012345678901234567890123456789012345678901234567890123"
-	service, err := NewPrivateKeyService(privateKey)
+	service, err := NewPrivateKeyService(testPrivateKey)
 	if err != nil {
 		t.Fatalf("create signer: %v", err)
 	}
@@ -46,5 +47,49 @@ func TestPrivateKeyServiceSignsTransactionForExpectedAddress(t *testing.T) {
 	}
 	if sender != expected {
 		t.Fatalf("expected sender %s, got %s", expected.Hex(), sender.Hex())
+	}
+}
+
+func TestPrivateKeyServiceRejectsNilTransaction(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	service, err := NewPrivateKeyService(testPrivateKey)
+	if err != nil {
+		t.Fatalf("create signer: %v", err)
+	}
+
+	// Act
+	_, err = service.SignTransaction(ctx, nil, big.NewInt(1))
+
+	// Assert
+	if err == nil {
+		t.Fatalf("expected nil transaction to be rejected")
+	}
+}
+
+func TestPrivateKeyServiceRejectsNilChainID(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	service, err := NewPrivateKeyService(testPrivateKey)
+	if err != nil {
+		t.Fatalf("create signer: %v", err)
+	}
+	tx := types.NewTx(&types.DynamicFeeTx{
+		ChainID:   big.NewInt(1),
+		Nonce:     1,
+		GasTipCap: big.NewInt(1),
+		GasFeeCap: big.NewInt(2),
+		Gas:       21000,
+		To:        &common.Address{},
+		Value:     big.NewInt(0),
+		Data:      nil,
+	})
+
+	// Act
+	_, err = service.SignTransaction(ctx, tx, nil)
+
+	// Assert
+	if err == nil {
+		t.Fatalf("expected nil chain ID to be rejected")
 	}
 }

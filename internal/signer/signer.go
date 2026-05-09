@@ -3,6 +3,7 @@ package signer
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -10,6 +11,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+)
+
+const (
+	errNilTransaction = "transaction is nil"
+	errNilChainID     = "chain ID is nil"
 )
 
 type Service interface {
@@ -36,6 +42,12 @@ func (service *PrivateKeyService) Address(ctx context.Context) (common.Address, 
 }
 
 func (service *PrivateKeyService) SignTransaction(ctx context.Context, tx *types.Transaction, chainID *big.Int) (*types.Transaction, error) {
+	if tx == nil {
+		return nil, errors.New(errNilTransaction)
+	}
+	if chainID == nil {
+		return nil, errors.New(errNilChainID)
+	}
 	signer := types.LatestSignerForChainID(chainID)
 	signed, err := types.SignTx(tx, signer, service.key)
 	if err != nil {
