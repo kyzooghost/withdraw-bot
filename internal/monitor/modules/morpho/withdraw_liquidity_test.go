@@ -331,8 +331,13 @@ func TestWithdrawLiquidityModuleReturnsUrgentWhenExitSimulatorReturnsError(t *te
 	}
 	assertFinding(t, result, core.FindingExitSimulation, core.SeverityUrgent)
 	for _, finding := range result.Findings {
-		if finding.Key == core.FindingExitSimulation && finding.Evidence["error"] != "" {
-			t.Fatalf("expected simulation error detail to stay out of evidence, got %q", finding.Evidence["error"])
+		if finding.Key != core.FindingExitSimulation {
+			continue
+		}
+		for _, value := range finding.Evidence {
+			if value == "simulation reverted with provider detail" {
+				t.Fatalf("expected simulation error detail to stay out of evidence")
+			}
 		}
 	}
 }

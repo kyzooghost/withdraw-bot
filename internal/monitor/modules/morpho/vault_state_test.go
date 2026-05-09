@@ -154,6 +154,7 @@ func TestTrackedTimelockSelectorKeysIncludesRequiredSelectors(t *testing.T) {
 		"abdicate",
 		"setPerformanceFee",
 		"setManagementFee",
+		"setPerformanceFeeRecipient",
 		"setManagementFeeRecipient",
 		"setForceDeallocatePenalty",
 	}
