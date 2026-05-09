@@ -535,6 +535,17 @@ Systemd is not required for v1. Optional documentation may mention systemd as VP
 
 Testing should focus on the interface boundaries and safety-critical flows.
 
+All unit tests must follow the local `unit-test` skill guidelines:
+
+- Use Arrange, Act, Assert structure.
+- Use test names that describe expected behavior, not implementation details.
+- Verify one behavior per test.
+- Test public behavior through package APIs and interfaces.
+- Mock time, RPC clients, Telegram clients, signers, and transaction submission deterministically.
+- Avoid global state and test-order dependencies.
+- Prefer real domain value objects where cheap, and use fakes only for external systems or hard-to-control boundaries.
+- Reuse shared test fixtures or factories when the same setup appears in two or more test files.
+
 Unit tests:
 
 - Config parsing and validation
