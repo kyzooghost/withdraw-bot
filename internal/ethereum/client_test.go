@@ -21,6 +21,7 @@ const (
 	testBadFallbackURL    = "bad-fallback-url"
 	testCallContractOp    = "CallContract"
 	testPendingNonceAtOp  = "PendingNonceAt"
+	testSuggestGasPriceOp = "SuggestGasPrice"
 	testSuggestGasTipOp   = "SuggestGasTipCap"
 	testEstimateGasOp     = "EstimateGas"
 	testReceiptOp         = "TransactionReceipt"
@@ -41,6 +42,7 @@ type testRPCClient struct {
 	errs       map[string]error
 	callResult []byte
 	nonce      uint64
+	gasPrice   *big.Int
 	tipCap     *big.Int
 	gas        uint64
 	receipt    *types.Receipt
@@ -70,6 +72,14 @@ func (client *testRPCClient) SuggestGasTipCap(ctx context.Context) (*big.Int, er
 		return nil, err
 	}
 	return client.tipCap, nil
+}
+
+func (client *testRPCClient) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
+	client.record(testSuggestGasPriceOp)
+	if err := client.errs[testSuggestGasPriceOp]; err != nil {
+		return nil, err
+	}
+	return client.gasPrice, nil
 }
 
 func (client *testRPCClient) EstimateGas(ctx context.Context, call geth.CallMsg) (uint64, error) {
@@ -137,6 +147,15 @@ func TestMultiClientReadMethodsUsePrimaryThenFallbacks(t *testing.T) {
 				return new(big.Int).SetUint64(result).String(), err
 			},
 			expected: "7",
+		},
+		{
+			name:      "gas price",
+			operation: testSuggestGasPriceOp,
+			call: func(ctx context.Context, client MultiClient) (string, error) {
+				result, err := client.SuggestGasPrice(ctx)
+				return result.String(), err
+			},
+			expected: "100",
 		},
 		{
 			name:      "gas tip cap",
@@ -296,6 +315,7 @@ func testClient(name string, calls *[]string) *testRPCClient {
 		errs:       make(map[string]error),
 		callResult: []byte("ok"),
 		nonce:      7,
+		gasPrice:   big.NewInt(100),
 		tipCap:     big.NewInt(3),
 		gas:        21000,
 		receipt:    &types.Receipt{TxHash: common.HexToHash("0x1234")},

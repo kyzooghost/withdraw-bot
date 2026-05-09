@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
 
 	"withdraw-bot/internal/core"
@@ -25,7 +26,10 @@ const (
 	withdrawalAttemptIDTimeFormat = "20060102T150405.000000000Z0700"
 )
 
-var ErrSimulationFailed = errors.New("full-exit simulation failed")
+var (
+	ErrSimulationFailed    = errors.New("full-exit simulation failed")
+	ErrSignerOwnerMismatch = errors.New("signer address does not match position owner")
+)
 
 type Adapter interface {
 	ID() string
@@ -36,6 +40,7 @@ type Adapter interface {
 
 type TransactionSubmitter interface {
 	PendingNonceAt(ctx context.Context, account common.Address) (uint64, error)
+	SuggestGasPrice(ctx context.Context) (*big.Int, error)
 	SuggestGasTipCap(ctx context.Context) (*big.Int, error)
 	SendTransaction(ctx context.Context, tx *types.Transaction) error
 }
@@ -89,6 +94,7 @@ type Service struct {
 	GasLimitBufferBPS  int64
 	ReplacementTimeout time.Duration
 
+	mu      sync.Mutex
 	pending *pendingWithdrawal
 }
 
@@ -122,6 +128,9 @@ func (service *Service) DryRunFullExit(ctx context.Context) (WithdrawalResult, e
 }
 
 func (service *Service) ExecuteFullExit(ctx context.Context, trigger WithdrawalTrigger) (WithdrawalResult, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+
 	if err := service.validateExecuteConfig(); err != nil {
 		return WithdrawalResult{}, err
 	}
@@ -140,6 +149,13 @@ func (service *Service) ExecuteFullExit(ctx context.Context, trigger WithdrawalT
 	}
 	if position.ShareBalance.Sign() < 0 {
 		return WithdrawalResult{}, errors.New("share balance must be non-negative")
+	}
+	signerAddress, err := service.Signer.Address(ctx)
+	if err != nil {
+		return WithdrawalResult{}, fmt.Errorf("read signer address: %w", err)
+	}
+	if signerAddress != position.Owner {
+		return WithdrawalResult{}, ErrSignerOwnerMismatch
 	}
 
 	request := fullExitRequest(position)
@@ -170,7 +186,7 @@ func (service *Service) ExecuteFullExit(ctx context.Context, trigger WithdrawalT
 	if err != nil {
 		return WithdrawalResult{}, err
 	}
-	nonce, feeCaps, err := service.nonceAndFeeCaps(ctx, now)
+	nonce, feeCaps, err := service.nonceAndFeeCaps(ctx, signerAddress, now)
 	if err != nil {
 		return WithdrawalResult{}, err
 	}
@@ -192,7 +208,7 @@ func (service *Service) ExecuteFullExit(ctx context.Context, trigger WithdrawalT
 	}
 	service.pending = &pendingWithdrawal{Nonce: nonce, FeeCaps: feeCaps.Clone(), SubmittedAt: now, TxHash: signed.Hash()}
 	if err := service.recordAttempt(ctx, trigger, result, simulation, "", now); err != nil {
-		return WithdrawalResult{}, err
+		return result, err
 	}
 	return result, nil
 }
@@ -216,18 +232,15 @@ func (service *Service) validateExecuteConfig() error {
 	return nil
 }
 
-func (service *Service) nonceAndFeeCaps(ctx context.Context, now time.Time) (uint64, FeeCaps, error) {
+func (service *Service) nonceAndFeeCaps(ctx context.Context, signerAddress common.Address, now time.Time) (uint64, FeeCaps, error) {
 	if service.pending != nil {
 		if service.ReplacementTimeout <= 0 || now.Sub(service.pending.SubmittedAt) >= service.ReplacementTimeout {
-			return service.pending.Nonce, service.GasPolicy.Bump(service.pending.FeeCaps), nil
+			feeCaps, err := service.GasPolicy.BumpChecked(service.pending.FeeCaps)
+			return service.pending.Nonce, feeCaps, err
 		}
 		return service.pending.Nonce, service.pending.FeeCaps.Clone(), nil
 	}
-	address, err := service.Signer.Address(ctx)
-	if err != nil {
-		return 0, FeeCaps{}, fmt.Errorf("read signer address: %w", err)
-	}
-	nonce, err := service.Submitter.PendingNonceAt(ctx, address)
+	nonce, err := service.Submitter.PendingNonceAt(ctx, signerAddress)
 	if err != nil {
 		return 0, FeeCaps{}, fmt.Errorf("read pending nonce: %w", err)
 	}
@@ -239,6 +252,16 @@ func (service *Service) nonceAndFeeCaps(ctx context.Context, now time.Time) (uin
 }
 
 func (service *Service) initialFeeCaps(ctx context.Context) (FeeCaps, error) {
+	if err := service.GasPolicy.validateCaps(); err != nil {
+		return FeeCaps{}, err
+	}
+	gasPrice, err := service.Submitter.SuggestGasPrice(ctx)
+	if err != nil {
+		return FeeCaps{}, fmt.Errorf("suggest gas price: %w", err)
+	}
+	if gasPrice == nil || gasPrice.Sign() <= 0 {
+		return FeeCaps{}, errors.New("suggested gas price must be positive")
+	}
 	tipCap, err := service.Submitter.SuggestGasTipCap(ctx)
 	if err != nil {
 		return FeeCaps{}, fmt.Errorf("suggest gas tip cap: %w", err)
@@ -246,11 +269,16 @@ func (service *Service) initialFeeCaps(ctx context.Context) (FeeCaps, error) {
 	if tipCap == nil || tipCap.Sign() <= 0 {
 		return FeeCaps{}, errors.New("suggested gas tip cap must be positive")
 	}
-	maxFee := new(big.Int).Mul(tipCap, big.NewInt(2))
-	return FeeCaps{
+	priorityFee := capBig(tipCap, service.GasPolicy.MaxTipCap)
+	maxFee := new(big.Int).Add(gasPrice, priorityFee)
+	feeCaps := FeeCaps{
 		MaxFeePerGas:         capBig(maxFee, service.GasPolicy.MaxFeeCap),
-		MaxPriorityFeePerGas: capBig(tipCap, service.GasPolicy.MaxTipCap),
-	}, nil
+		MaxPriorityFeePerGas: priorityFee,
+	}
+	if err := feeCaps.Validate(); err != nil {
+		return FeeCaps{}, err
+	}
+	return feeCaps, nil
 }
 
 func (service *Service) recordAttempt(ctx context.Context, trigger WithdrawalTrigger, result WithdrawalResult, simulation core.FullExitSimulation, failureReason string, now time.Time) error {
@@ -337,11 +365,4 @@ func cloneBytes(value []byte) []byte {
 	clone := make([]byte, len(value))
 	copy(clone, value)
 	return clone
-}
-
-func (fees FeeCaps) Clone() FeeCaps {
-	return FeeCaps{
-		MaxFeePerGas:         cloneBigInt(fees.MaxFeePerGas),
-		MaxPriorityFeePerGas: cloneBigInt(fees.MaxPriorityFeePerGas),
-	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,7 +21,12 @@ func TestDryRunFullExitReturnsNoopWhenSharesAreZero(t *testing.T) {
 	adapter := &fakeWithdrawAdapter{
 		position: core.PositionSnapshot{ShareBalance: big.NewInt(0)},
 	}
-	service := Service{Adapter: adapter}
+	service := Service{
+		Adapter:   adapter,
+		Signer:    &fakeSigner{},
+		Submitter: &fakeSubmitter{nonce: 7, gasPrice: big.NewInt(100), tipCap: big.NewInt(8)},
+		Clock:     mutableClock{value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)},
+	}
 
 	// Act
 	result, err := service.DryRunFullExit(ctx)
@@ -56,7 +62,7 @@ func TestExecuteFullExitDoesNotSignWhenSimulationFails(t *testing.T) {
 		candidate: core.TxCandidate{To: vault, Value: big.NewInt(0), Data: []byte{0x01}},
 	}
 	signer := &fakeSigner{address: owner}
-	submitter := &fakeSubmitter{nonce: 7, tipCap: big.NewInt(8)}
+	submitter := &fakeSubmitter{nonce: 7, gasPrice: big.NewInt(100), tipCap: big.NewInt(8)}
 	repo := &fakeWithdrawalRepository{}
 	service := Service{
 		Adapter:    adapter,
@@ -107,7 +113,7 @@ func TestUrgentReplacementBumpsPendingTransactionFeesAfterTimeout(t *testing.T) 
 		candidate: core.TxCandidate{To: vault, Value: big.NewInt(0), Data: []byte{0x01}},
 	}
 	clock := &mutableClock{value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)}
-	submitter := &fakeSubmitter{nonce: 7, tipCap: big.NewInt(8)}
+	submitter := &fakeSubmitter{nonce: 7, gasPrice: big.NewInt(100), tipCap: big.NewInt(8)}
 	service := Service{
 		Adapter:            adapter,
 		Signer:             &fakeSigner{address: owner},
@@ -164,7 +170,7 @@ func TestUrgentReplacementDoesNotSubmitAgainBeforeTimeout(t *testing.T) {
 		candidate: core.TxCandidate{To: vault, Value: big.NewInt(0), Data: []byte{0x01}},
 	}
 	clock := &mutableClock{value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)}
-	submitter := &fakeSubmitter{nonce: 7, tipCap: big.NewInt(8)}
+	submitter := &fakeSubmitter{nonce: 7, gasPrice: big.NewInt(100), tipCap: big.NewInt(8)}
 	service := Service{
 		Adapter:            adapter,
 		Signer:             &fakeSigner{address: owner},
@@ -194,6 +200,193 @@ func TestUrgentReplacementDoesNotSubmitAgainBeforeTimeout(t *testing.T) {
 	}
 }
 
+func TestExecuteFullExitUsesSuggestedGasPriceForMaxFee(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	vault := common.HexToAddress("0x8c106EEDAd96553e64287A5A6839c3Cc78afA3D0")
+	owner := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	receiver := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	adapter := &fakeWithdrawAdapter{
+		position: core.PositionSnapshot{Vault: vault, Owner: owner, Receiver: receiver, ShareBalance: big.NewInt(789)},
+		simulation: core.FullExitSimulation{
+			Success:            true,
+			ExpectedAssetUnits: big.NewInt(456),
+			GasUnits:           100_000,
+		},
+		candidate: core.TxCandidate{To: vault, Value: big.NewInt(0), Data: []byte{0x01}},
+	}
+	submitter := &fakeSubmitter{nonce: 7, gasPrice: big.NewInt(100), tipCap: big.NewInt(8)}
+	service := Service{
+		Adapter:           adapter,
+		Signer:            &fakeSigner{address: owner},
+		Submitter:         submitter,
+		Repository:        &fakeWithdrawalRepository{},
+		ChainID:           big.NewInt(1),
+		Clock:             mutableClock{value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)},
+		GasLimitBufferBPS: 2000,
+	}
+
+	// Act
+	_, err := service.ExecuteFullExit(ctx, urgentTrigger())
+
+	// Assert
+	if err != nil {
+		t.Fatalf("execute full exit: %v", err)
+	}
+	if len(submitter.sent) != 1 {
+		t.Fatalf("expected one submitted transaction, got %d", len(submitter.sent))
+	}
+	if submitter.sent[0].GasFeeCap().String() != "108" {
+		t.Fatalf("expected max fee to include suggested gas price and tip, got %s", submitter.sent[0].GasFeeCap().String())
+	}
+}
+
+func TestExecuteFullExitRejectsSignerOwnerMismatch(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	vault := common.HexToAddress("0x8c106EEDAd96553e64287A5A6839c3Cc78afA3D0")
+	owner := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	receiver := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	adapter := &fakeWithdrawAdapter{
+		position: core.PositionSnapshot{Vault: vault, Owner: owner, Receiver: receiver, ShareBalance: big.NewInt(789)},
+		simulation: core.FullExitSimulation{
+			Success:            true,
+			ExpectedAssetUnits: big.NewInt(456),
+			GasUnits:           100_000,
+		},
+		candidate: core.TxCandidate{To: vault, Value: big.NewInt(0), Data: []byte{0x01}},
+	}
+	signer := &fakeSigner{address: common.HexToAddress("0x0000000000000000000000000000000000000003")}
+	service := Service{
+		Adapter:    adapter,
+		Signer:     signer,
+		Submitter:  &fakeSubmitter{nonce: 7, gasPrice: big.NewInt(100), tipCap: big.NewInt(8)},
+		Repository: &fakeWithdrawalRepository{},
+		ChainID:    big.NewInt(1),
+		Clock:      mutableClock{value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)},
+	}
+
+	// Act
+	_, err := service.ExecuteFullExit(ctx, urgentTrigger())
+
+	// Assert
+	if !errors.Is(err, ErrSignerOwnerMismatch) {
+		t.Fatalf("expected signer owner mismatch, got %v", err)
+	}
+	if adapter.simulateCalls != 0 {
+		t.Fatalf("expected no simulation calls, got %d", adapter.simulateCalls)
+	}
+	if signer.signCalls != 0 {
+		t.Fatalf("expected no signing, got %d sign call(s)", signer.signCalls)
+	}
+}
+
+func TestExecuteFullExitRejectsInvalidFeeCapOrdering(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	vault := common.HexToAddress("0x8c106EEDAd96553e64287A5A6839c3Cc78afA3D0")
+	owner := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	receiver := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	adapter := &fakeWithdrawAdapter{
+		position: core.PositionSnapshot{Vault: vault, Owner: owner, Receiver: receiver, ShareBalance: big.NewInt(789)},
+		simulation: core.FullExitSimulation{
+			Success:            true,
+			ExpectedAssetUnits: big.NewInt(456),
+			GasUnits:           100_000,
+		},
+		candidate: core.TxCandidate{To: vault, Value: big.NewInt(0), Data: []byte{0x01}},
+	}
+	signer := &fakeSigner{address: owner}
+	submitter := &fakeSubmitter{nonce: 7, gasPrice: big.NewInt(100), tipCap: big.NewInt(8)}
+	service := Service{
+		Adapter:    adapter,
+		Signer:     signer,
+		Submitter:  submitter,
+		Repository: &fakeWithdrawalRepository{},
+		ChainID:    big.NewInt(1),
+		Clock:      mutableClock{value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)},
+		GasPolicy:  GasPolicy{MaxFeeCap: big.NewInt(5), MaxTipCap: big.NewInt(8)},
+	}
+
+	// Act
+	_, err := service.ExecuteFullExit(ctx, urgentTrigger())
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected invalid fee cap ordering error")
+	}
+	if signer.signCalls != 0 {
+		t.Fatalf("expected no signing, got %d sign call(s)", signer.signCalls)
+	}
+	if len(submitter.sent) != 0 {
+		t.Fatalf("expected no submitted transaction, got %d", len(submitter.sent))
+	}
+}
+
+func TestExecuteFullExitIsConcurrencySafeForPendingWithdrawal(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	vault := common.HexToAddress("0x8c106EEDAd96553e64287A5A6839c3Cc78afA3D0")
+	owner := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	receiver := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	adapter := &fakeWithdrawAdapter{
+		position: core.PositionSnapshot{Vault: vault, Owner: owner, Receiver: receiver, ShareBalance: big.NewInt(789)},
+		simulation: core.FullExitSimulation{
+			Success:            true,
+			ExpectedAssetUnits: big.NewInt(456),
+			GasUnits:           100_000,
+		},
+		candidate: core.TxCandidate{To: vault, Value: big.NewInt(0), Data: []byte{0x01}},
+	}
+	releaseSend := make(chan struct{})
+	sendStarted := make(chan struct{}, 2)
+	submitter := &fakeSubmitter{
+		nonce:       7,
+		gasPrice:    big.NewInt(100),
+		tipCap:      big.NewInt(8),
+		releaseSend: releaseSend,
+		sendStarted: sendStarted,
+	}
+	service := Service{
+		Adapter:            adapter,
+		Signer:             &fakeSigner{address: owner},
+		Submitter:          submitter,
+		Repository:         &fakeWithdrawalRepository{},
+		ChainID:            big.NewInt(1),
+		Clock:              mutableClock{value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)},
+		GasLimitBufferBPS:  2000,
+		ReplacementTimeout: 2 * time.Minute,
+	}
+	errCh := make(chan error, 2)
+
+	// Act
+	go func() {
+		_, err := service.ExecuteFullExit(ctx, urgentTrigger())
+		errCh <- err
+	}()
+	<-sendStarted
+	go func() {
+		_, err := service.ExecuteFullExit(ctx, urgentTrigger())
+		errCh <- err
+	}()
+
+	// Assert
+	select {
+	case <-sendStarted:
+		t.Fatal("expected second call to wait for pending state")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseSend)
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("execute full exit: %v", err)
+		}
+	}
+	if len(submitter.sent) != 1 {
+		t.Fatalf("expected one submitted transaction, got %d", len(submitter.sent))
+	}
+}
+
 func TestExecuteFullExitKeepsPendingNonceWhenRepositoryFailsAfterSubmit(t *testing.T) {
 	// Arrange
 	ctx := context.Background()
@@ -211,7 +404,7 @@ func TestExecuteFullExitKeepsPendingNonceWhenRepositoryFailsAfterSubmit(t *testi
 	}
 	clock := &mutableClock{value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)}
 	repo := &fakeWithdrawalRepository{err: errors.New("database temporarily unavailable")}
-	submitter := &fakeSubmitter{nonce: 7, tipCap: big.NewInt(8)}
+	submitter := &fakeSubmitter{nonce: 7, gasPrice: big.NewInt(100), tipCap: big.NewInt(8)}
 	service := Service{
 		Adapter:            adapter,
 		Signer:             &fakeSigner{address: owner},
@@ -225,7 +418,7 @@ func TestExecuteFullExitKeepsPendingNonceWhenRepositoryFailsAfterSubmit(t *testi
 	}
 
 	// Act
-	_, err := service.ExecuteFullExit(ctx, urgentTrigger())
+	result, err := service.ExecuteFullExit(ctx, urgentTrigger())
 	repo.err = nil
 	clock.value = clock.value.Add(time.Minute)
 	_, nextErr := service.ExecuteFullExit(ctx, urgentTrigger())
@@ -233,6 +426,12 @@ func TestExecuteFullExitKeepsPendingNonceWhenRepositoryFailsAfterSubmit(t *testi
 	// Assert
 	if err == nil {
 		t.Fatal("expected repository error")
+	}
+	if result.Status != WithdrawalStatusSubmitted {
+		t.Fatalf("expected submitted result despite repository error, got %s", result.Status)
+	}
+	if result.TxHash == (common.Hash{}) {
+		t.Fatal("expected submitted tx hash despite repository error")
 	}
 	if nextErr != nil {
 		t.Fatalf("handle pending full exit: %v", nextErr)
@@ -303,9 +502,13 @@ func (signer *fakeSigner) SignTransaction(ctx context.Context, tx *types.Transac
 }
 
 type fakeSubmitter struct {
-	nonce  uint64
-	tipCap *big.Int
-	sent   []*types.Transaction
+	nonce       uint64
+	gasPrice    *big.Int
+	tipCap      *big.Int
+	sent        []*types.Transaction
+	releaseSend chan struct{}
+	sendStarted chan struct{}
+	mu          sync.Mutex
 }
 
 func (submitter *fakeSubmitter) PendingNonceAt(ctx context.Context, account common.Address) (uint64, error) {
@@ -316,8 +519,20 @@ func (submitter *fakeSubmitter) SuggestGasTipCap(ctx context.Context) (*big.Int,
 	return new(big.Int).Set(submitter.tipCap), nil
 }
 
+func (submitter *fakeSubmitter) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
+	return new(big.Int).Set(submitter.gasPrice), nil
+}
+
 func (submitter *fakeSubmitter) SendTransaction(ctx context.Context, tx *types.Transaction) error {
+	submitter.mu.Lock()
 	submitter.sent = append(submitter.sent, tx)
+	submitter.mu.Unlock()
+	if submitter.sendStarted != nil {
+		submitter.sendStarted <- struct{}{}
+	}
+	if submitter.releaseSend != nil {
+		<-submitter.releaseSend
+	}
 	return nil
 }
 

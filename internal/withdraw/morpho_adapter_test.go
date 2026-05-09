@@ -88,6 +88,10 @@ func (client *morphoTestRPCClient) SuggestGasTipCap(ctx context.Context) (*big.I
 	return big.NewInt(0), nil
 }
 
+func (client *morphoTestRPCClient) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
+	return big.NewInt(0), nil
+}
+
 func (client *morphoTestRPCClient) EstimateGas(ctx context.Context, call geth.CallMsg) (uint64, error) {
 	client.estimateCalled = true
 	if call.To == nil {

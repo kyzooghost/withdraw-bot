@@ -21,3 +21,31 @@ func TestBumpFeesIncreasesFeesAndRespectsCaps(t *testing.T) {
 		t.Fatalf("expected priority fee 9, got %s", result.MaxPriorityFeePerGas.String())
 	}
 }
+
+func TestBumpCheckedRejectsNilFee(t *testing.T) {
+	// Arrange
+	policy := GasPolicy{BumpBPS: 1250}
+	fees := FeeCaps{MaxFeePerGas: nil, MaxPriorityFeePerGas: big.NewInt(8)}
+
+	// Act
+	_, err := policy.BumpChecked(fees)
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected nil fee error")
+	}
+}
+
+func TestBumpCheckedRejectsInvalidCapOrdering(t *testing.T) {
+	// Arrange
+	policy := GasPolicy{BumpBPS: 1250, MaxFeeCap: big.NewInt(5), MaxTipCap: big.NewInt(10)}
+	fees := FeeCaps{MaxFeePerGas: big.NewInt(100), MaxPriorityFeePerGas: big.NewInt(8)}
+
+	// Act
+	_, err := policy.BumpChecked(fees)
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected invalid fee cap ordering error")
+	}
+}

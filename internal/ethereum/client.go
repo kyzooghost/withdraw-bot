@@ -22,6 +22,7 @@ var ErrPreBroadcast = errors.New("transaction failed before broadcast")
 type RPCClient interface {
 	CallContract(ctx context.Context, call ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
 	PendingNonceAt(ctx context.Context, account common.Address) (uint64, error)
+	SuggestGasPrice(ctx context.Context) (*big.Int, error)
 	SuggestGasTipCap(ctx context.Context) (*big.Int, error)
 	EstimateGas(ctx context.Context, call ethereum.CallMsg) (uint64, error)
 	SendTransaction(ctx context.Context, tx *types.Transaction) error
@@ -111,6 +112,22 @@ func (client MultiClient) SuggestGasTipCap(ctx context.Context) (*big.Int, error
 		lastErr = err
 	}
 	return nil, fmt.Errorf("suggest gas tip cap failed on all RPC clients: %w", lastErr)
+}
+
+func (client MultiClient) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
+	clients, err := client.rpcClients()
+	if err != nil {
+		return nil, fmt.Errorf("suggest gas price: %w", err)
+	}
+	var lastErr error
+	for _, rpc := range clients {
+		result, err := rpc.SuggestGasPrice(ctx)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("suggest gas price failed on all RPC clients: %w", lastErr)
 }
 
 func (client MultiClient) EstimateGas(ctx context.Context, call ethereum.CallMsg) (uint64, error) {
