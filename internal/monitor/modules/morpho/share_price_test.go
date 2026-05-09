@@ -82,6 +82,25 @@ func TestSharePriceModuleAcceptsValidConfig(t *testing.T) {
 	}
 }
 
+func TestSharePriceModuleMonitorRejectsZeroUrgentThreshold(t *testing.T) {
+	// Arrange
+	module := SharePriceModule{
+		BaselineSharePrice: big.NewInt(1_000_000),
+		WarnBPS:            50,
+		UrgentBPS:          0,
+		Reader:             fakeSharePriceReader{price: big.NewInt(1_000_000)},
+		Clock:              core.FixedClock{Value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)},
+	}
+
+	// Act
+	_, err := module.Monitor(context.Background())
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected invalid threshold error")
+	}
+}
+
 func TestSharePriceModuleReturnsOKWhenThereIsNoLoss(t *testing.T) {
 	// Arrange
 	module := SharePriceModule{

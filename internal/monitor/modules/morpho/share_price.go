@@ -61,6 +61,9 @@ func (module SharePriceModule) Bootstrap(ctx context.Context) (map[string]any, e
 }
 
 func (module SharePriceModule) Monitor(ctx context.Context) (core.MonitorResult, error) {
+	if err := module.ValidateConfig(ctx); err != nil {
+		return core.MonitorResult{}, err
+	}
 	current, err := module.Reader.CurrentSharePrice(ctx)
 	if err != nil {
 		return core.MonitorResult{}, err

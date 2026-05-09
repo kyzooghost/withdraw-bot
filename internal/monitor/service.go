@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -12,6 +13,12 @@ import (
 )
 
 const moduleIDEvidenceKey = "module_id"
+
+var (
+	errInvalidMonitorModule = errors.New("invalid monitor module")
+	errMonitorModuleFailure = errors.New("monitor module failure")
+	errMonitorStorage       = errors.New("monitor storage failure")
+)
 
 type Module interface {
 	ID() core.MonitorModuleID
@@ -39,16 +46,19 @@ func (service *Service) RunOnce(ctx context.Context) ([]core.MonitorResult, erro
 	results := make([]core.MonitorResult, 0, len(service.Modules))
 	var resultErr error
 	for _, module := range service.Modules {
-		if module == nil {
-			return results, errors.Join(resultErr, errors.New("monitor module is nil"))
+		if isNilModule(module) {
+			return results, errors.Join(resultErr, errInvalidMonitorModule, errors.New("monitor module is nil"))
 		}
 		moduleID := module.ID()
 		if moduleID == "" {
-			return results, errors.Join(resultErr, errors.New("monitor module id is empty"))
+			return results, errors.Join(resultErr, errInvalidMonitorModule, errors.New("monitor module id is empty"))
+		}
+		if err := module.ValidateConfig(ctx); err != nil {
+			return results, errors.Join(resultErr, errInvalidMonitorModule, fmt.Errorf("validate monitor module %s: %w", moduleID, err))
 		}
 		result, err := module.Monitor(ctx)
 		if err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("run monitor module %s: %w", moduleID, err))
+			resultErr = errors.Join(resultErr, errMonitorModuleFailure, fmt.Errorf("run monitor module %s: %w", moduleID, err))
 			result = core.MonitorResult{
 				ModuleID:   moduleID,
 				Status:     core.MonitorStatusUnknown,
@@ -67,7 +77,7 @@ func (service *Service) RunOnce(ctx context.Context) ([]core.MonitorResult, erro
 		service.Latest[resultClone.ModuleID] = resultClone
 		service.mu.Unlock()
 		if err := service.Storage.InsertMonitorResult(ctx, resultClone.Clone(), service.Clock.Now()); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("store monitor result for %s: %w", moduleID, err))
+			resultErr = errors.Join(resultErr, errMonitorStorage, fmt.Errorf("store monitor result for %s: %w", moduleID, err))
 		}
 		results = append(results, resultClone.Clone())
 	}
@@ -90,7 +100,7 @@ func (service *Service) RunLoop(ctx context.Context, interval time.Duration) err
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	if _, err := service.RunOnce(ctx); err != nil {
+	if _, err := service.RunOnce(ctx); err != nil && !isRecoverableMonitorError(err) {
 		return err
 	}
 	for {
@@ -98,9 +108,28 @@ func (service *Service) RunLoop(ctx context.Context, interval time.Duration) err
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if _, err := service.RunOnce(ctx); err != nil {
+			if _, err := service.RunOnce(ctx); err != nil && !isRecoverableMonitorError(err) {
 				return err
 			}
 		}
+	}
+}
+
+func isRecoverableMonitorError(err error) bool {
+	return errors.Is(err, errMonitorModuleFailure) &&
+		!errors.Is(err, errInvalidMonitorModule) &&
+		!errors.Is(err, errMonitorStorage)
+}
+
+func isNilModule(module Module) bool {
+	if module == nil {
+		return true
+	}
+	value := reflect.ValueOf(module)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
 	}
 }
