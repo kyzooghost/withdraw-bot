@@ -37,7 +37,11 @@ func (client VaultClient) BalanceOf(ctx context.Context, owner common.Address) (
 	if err != nil {
 		return nil, err
 	}
-	return out[0].(*big.Int), nil
+	value, err := uint256Output(vaultMethodBalanceOf, out)
+	if err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 func (client VaultClient) PreviewRedeem(ctx context.Context, shares *big.Int) (*big.Int, error) {
@@ -45,5 +49,20 @@ func (client VaultClient) PreviewRedeem(ctx context.Context, shares *big.Int) (*
 	if err != nil {
 		return nil, err
 	}
-	return out[0].(*big.Int), nil
+	value, err := uint256Output(vaultMethodPreviewRedeem, out)
+	if err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func uint256Output(method string, out []any) (*big.Int, error) {
+	if len(out) != 1 {
+		return nil, fmt.Errorf("unpack %s output: expected 1 value, got %d", method, len(out))
+	}
+	value, ok := out[0].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("unpack %s output: expected uint256", method)
+	}
+	return new(big.Int).Set(value), nil
 }

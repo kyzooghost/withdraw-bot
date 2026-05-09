@@ -2,6 +2,8 @@ package withdraw
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math/big"
 
 	"withdraw-bot/internal/core"
@@ -13,6 +15,16 @@ import (
 )
 
 const MorphoVaultV2AdapterID = "morpho_vault_v2"
+
+const simulationFailedReason = "simulation failed"
+
+var (
+	errZeroVault           = errors.New("vault address is required")
+	errVaultClientMismatch = errors.New("vault client mismatch")
+	errZeroOwner           = errors.New("owner address is required")
+	errZeroReceiver        = errors.New("receiver address is required")
+	errInvalidShares       = errors.New("shares must be positive")
+)
 
 type MorphoAdapter struct {
 	Ethereum      ethereum.MultiClient
@@ -30,22 +42,32 @@ func (adapter MorphoAdapter) ID() string {
 }
 
 func (adapter MorphoAdapter) Position(ctx context.Context) (core.PositionSnapshot, error) {
+	if err := adapter.validateVaultClient(); err != nil {
+		return core.PositionSnapshot{}, err
+	}
 	shares, err := adapter.VaultClient.BalanceOf(ctx, adapter.Owner)
 	if err != nil {
 		return core.PositionSnapshot{}, err
+	}
+	clock := adapter.Clock
+	if clock == nil {
+		clock = core.SystemClock{}
 	}
 	return core.PositionSnapshot{
 		Vault:         adapter.Vault,
 		Owner:         adapter.Owner,
 		Receiver:      adapter.Receiver,
-		ShareBalance:  shares,
+		ShareBalance:  new(big.Int).Set(shares),
 		AssetSymbol:   adapter.AssetSymbol,
 		AssetDecimals: adapter.AssetDecimals,
-		ObservedAt:    adapter.Clock.Now(),
+		ObservedAt:    clock.Now(),
 	}, nil
 }
 
 func (adapter MorphoAdapter) BuildFullExit(ctx context.Context, req core.FullExitRequest) (core.TxCandidate, error) {
+	if err := adapter.validateFullExitRequest(req); err != nil {
+		return core.TxCandidate{}, err
+	}
 	data, err := morpho.PackRedeem(req.Shares, req.Receiver, req.Owner)
 	if err != nil {
 		return core.TxCandidate{}, err
@@ -54,6 +76,9 @@ func (adapter MorphoAdapter) BuildFullExit(ctx context.Context, req core.FullExi
 }
 
 func (adapter MorphoAdapter) SimulateFullExit(ctx context.Context, req core.FullExitRequest) (core.FullExitSimulation, error) {
+	if err := adapter.validateFullExitRequest(req); err != nil {
+		return core.FullExitSimulation{}, err
+	}
 	expected, err := adapter.VaultClient.PreviewRedeem(ctx, req.Shares)
 	if err != nil {
 		return core.FullExitSimulation{}, err
@@ -65,7 +90,39 @@ func (adapter MorphoAdapter) SimulateFullExit(ctx context.Context, req core.Full
 	call := geth.CallMsg{From: req.Owner, To: &candidate.To, Value: candidate.Value, Data: candidate.Data}
 	gas, err := adapter.Ethereum.EstimateGas(ctx, call)
 	if err != nil {
-		return core.FullExitSimulation{Success: false, ExpectedAssetUnits: expected, RevertReason: err.Error()}, nil
+		return core.FullExitSimulation{Success: false, ExpectedAssetUnits: new(big.Int).Set(expected), RevertReason: simulationFailedReason}, nil
 	}
-	return core.FullExitSimulation{Success: true, ExpectedAssetUnits: expected, GasUnits: gas}, nil
+	return core.FullExitSimulation{Success: true, ExpectedAssetUnits: new(big.Int).Set(expected), GasUnits: gas}, nil
+}
+
+func (adapter MorphoAdapter) validateVaultClient() error {
+	if adapter.Vault == (common.Address{}) {
+		return errZeroVault
+	}
+	if adapter.VaultClient.Vault != adapter.Vault {
+		return errVaultClientMismatch
+	}
+	return nil
+}
+
+func (adapter MorphoAdapter) validateFullExitRequest(req core.FullExitRequest) error {
+	if err := adapter.validateVaultClient(); err != nil {
+		return err
+	}
+	if req.Vault == (common.Address{}) {
+		return errZeroVault
+	}
+	if req.Vault != adapter.Vault {
+		return fmt.Errorf("request vault mismatch: %w", errVaultClientMismatch)
+	}
+	if req.Owner == (common.Address{}) {
+		return errZeroOwner
+	}
+	if req.Receiver == (common.Address{}) {
+		return errZeroReceiver
+	}
+	if req.Shares == nil || req.Shares.Sign() <= 0 {
+		return errInvalidShares
+	}
+	return nil
 }

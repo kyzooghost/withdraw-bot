@@ -13,6 +13,7 @@ func TestPackRedeemEncodesSelectorAndArguments(t *testing.T) {
 	shares := big.NewInt(123)
 	receiver := common.HexToAddress("0x0000000000000000000000000000000000000001")
 	owner := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	expectedSelector := []byte{0xba, 0x08, 0x76, 0x52}
 
 	// Act
 	data, err := PackRedeem(shares, receiver, owner)
@@ -26,8 +27,8 @@ func TestPackRedeemEncodesSelectorAndArguments(t *testing.T) {
 	}
 
 	method := VaultABI.Methods[vaultMethodRedeem]
-	if !bytes.Equal(data[:4], method.ID) {
-		t.Fatalf("expected redeem selector %x, got %x", method.ID, data[:4])
+	if !bytes.Equal(data[:4], expectedSelector) {
+		t.Fatalf("expected redeem selector %x, got %x", expectedSelector, data[:4])
 	}
 	decoded, err := method.Inputs.Unpack(data[4:])
 	if err != nil {
