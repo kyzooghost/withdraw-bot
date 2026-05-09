@@ -8,6 +8,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	configFieldAppMonitorInterval          = "app.monitor_interval"
+	configFieldGasReplacementTimeout       = "gas.replacement_timeout"
+	configFieldGasLimitBufferBPS           = "gas.gas_limit_buffer_bps"
+	configFieldGasFeeBumpBPS               = "gas.fee_bump_bps"
+	configFieldGasMaxFeePerGasGwei         = "gas.max_fee_per_gas_gwei"
+	configFieldGasMaxPriorityFeePerGasGwei = "gas.max_priority_fee_per_gas_gwei"
+)
+
 type Config struct {
 	App      AppConfig               `yaml:"app"`
 	Ethereum EthereumConfig          `yaml:"ethereum"`
@@ -70,10 +79,14 @@ func Load(path string) (Config, error) {
 
 func (cfg Config) Validate() error {
 	if cfg.App.MonitorInterval == "" {
-		return fmt.Errorf("app.monitor_interval is required")
+		return fmt.Errorf("%s is required", configFieldAppMonitorInterval)
 	}
-	if _, err := time.ParseDuration(cfg.App.MonitorInterval); err != nil {
-		return fmt.Errorf("app.monitor_interval must be a Go duration: %w", err)
+	monitorInterval, err := time.ParseDuration(cfg.App.MonitorInterval)
+	if err != nil {
+		return fmt.Errorf("%s must be a Go duration: %w", configFieldAppMonitorInterval, err)
+	}
+	if monitorInterval <= 0 {
+		return fmt.Errorf("%s must be positive", configFieldAppMonitorInterval)
 	}
 	if cfg.App.DataDir == "" {
 		return fmt.Errorf("app.data_dir is required")
@@ -92,6 +105,28 @@ func (cfg Config) Validate() error {
 	}
 	if len(cfg.Telegram.AllowedUserIDs) == 0 {
 		return fmt.Errorf("telegram.allowed_user_ids must not be empty")
+	}
+	if cfg.Gas.ReplacementTimeout == "" {
+		return fmt.Errorf("%s is required", configFieldGasReplacementTimeout)
+	}
+	replacementTimeout, err := time.ParseDuration(cfg.Gas.ReplacementTimeout)
+	if err != nil {
+		return fmt.Errorf("%s must be a Go duration: %w", configFieldGasReplacementTimeout, err)
+	}
+	if replacementTimeout <= 0 {
+		return fmt.Errorf("%s must be positive", configFieldGasReplacementTimeout)
+	}
+	if err := ValidateBPS(configFieldGasLimitBufferBPS, cfg.Gas.GasLimitBufferBPS); err != nil {
+		return err
+	}
+	if err := ValidateBPS(configFieldGasFeeBumpBPS, cfg.Gas.FeeBumpBPS); err != nil {
+		return err
+	}
+	if _, err := ParseGwei(configFieldGasMaxFeePerGasGwei, cfg.Gas.MaxFeePerGasGwei); err != nil {
+		return err
+	}
+	if _, err := ParseGwei(configFieldGasMaxPriorityFeePerGasGwei, cfg.Gas.MaxPriorityFeePerGasGwei); err != nil {
+		return err
 	}
 	return nil
 }

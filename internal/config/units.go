@@ -20,6 +20,9 @@ func ParseDecimalUnits(name string, value string, decimals uint8) (*big.Int, err
 	if clean == "" {
 		return nil, fmt.Errorf("%s is required", name)
 	}
+	if !isUnsignedBase10Decimal(clean) {
+		return nil, fmt.Errorf("%s must be an unsigned base-10 decimal string", name)
+	}
 	amount, ok := new(big.Rat).SetString(clean)
 	if !ok {
 		return nil, fmt.Errorf("%s must be a decimal string", name)
@@ -33,6 +36,30 @@ func ParseDecimalUnits(name string, value string, decimals uint8) (*big.Int, err
 		return nil, fmt.Errorf("%s must not be negative", name)
 	}
 	return scaled.Num(), nil
+}
+
+func isUnsignedBase10Decimal(value string) bool {
+	sawDigit := false
+	sawDecimalPoint := false
+	digitsAfterDecimalPoint := 0
+
+	for i := 0; i < len(value); i++ {
+		character := value[i]
+		if character >= '0' && character <= '9' {
+			sawDigit = true
+			if sawDecimalPoint {
+				digitsAfterDecimalPoint++
+			}
+			continue
+		}
+		if character == '.' && !sawDecimalPoint && sawDigit {
+			sawDecimalPoint = true
+			continue
+		}
+		return false
+	}
+
+	return sawDigit && (!sawDecimalPoint || digitsAfterDecimalPoint > 0)
 }
 
 func ParseGwei(name string, value string) (*big.Int, error) {
