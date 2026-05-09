@@ -29,3 +29,17 @@ func TestEscapeMarkdownV2EscapesReservedCharacters(t *testing.T) {
 		t.Fatalf("expected %q, got %q", expected, result)
 	}
 }
+
+func TestEscapeMarkdownV2EscapesBackslash(t *testing.T) {
+	// Arrange
+	input := `C:\vault\share_price_loss`
+
+	// Act
+	result := EscapeMarkdownV2(input)
+
+	// Assert
+	expected := `C:\\vault\\share\_price\_loss`
+	if result != expected {
+		t.Fatalf("expected %q, got %q", expected, result)
+	}
+}
