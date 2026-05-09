@@ -109,7 +109,7 @@ func (module WithdrawLiquidityModule) Monitor(ctx context.Context) (core.Monitor
 		Shares:   new(big.Int).Set(position.ShareBalance),
 	})
 	if err != nil {
-		return core.MonitorResult{}, err
+		simulation = core.FullExitSimulation{Success: false}
 	}
 	expectedExitAssets := big.NewInt(0)
 	if simulation.ExpectedAssetUnits != nil {

@@ -223,10 +223,23 @@ func appendStringDiff(diffs []StateDiff, field string, expected string, actual s
 }
 
 func appendComparableDiff[T any](diffs []StateDiff, field string, expected T, actual T) []StateDiff {
+	if isEmptyCollection(expected) && isEmptyCollection(actual) {
+		return diffs
+	}
 	if reflect.DeepEqual(expected, actual) {
 		return diffs
 	}
 	return append(diffs, StateDiff{Field: field, Expected: stableJSON(expected), Actual: stableJSON(actual)})
+}
+
+func isEmptyCollection(value any) bool {
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Map, reflect.Slice:
+		return reflected.Len() == 0
+	default:
+		return false
+	}
 }
 
 func stableJSON(value any) string {

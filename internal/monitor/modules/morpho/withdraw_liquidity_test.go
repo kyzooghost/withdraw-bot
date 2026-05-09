@@ -2,6 +2,7 @@ package morpho
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -181,6 +182,82 @@ func TestWithdrawLiquidityModuleReturnsWarnWhenIdleLiquidityIsBelowWarnThreshold
 	assertFinding(t, result, core.FindingIdleLiquidity, core.SeverityWarn)
 }
 
+func TestWithdrawLiquidityModuleReturnsOKWhenIdleLiquidityEqualsWarnThreshold(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	owner := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	receiver := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	vault := common.HexToAddress("0x8c106EEDAd96553e64287A5A6839c3Cc78afA3D0")
+	module := WithdrawLiquidityModule{
+		IdleAssetReader: fakeIdleAssetReader{assets: big.NewInt(1_000_000)},
+		ExitSimulator: &fakeExitSimulator{
+			position: core.PositionSnapshot{
+				Vault:        vault,
+				Owner:        owner,
+				Receiver:     receiver,
+				ShareBalance: big.NewInt(789),
+			},
+			simulation: core.FullExitSimulation{Success: true, ExpectedAssetUnits: big.NewInt(456)},
+		},
+		Owner:      owner,
+		Receiver:   receiver,
+		Vault:      vault,
+		IdleWarn:   big.NewInt(1_000_000),
+		IdleUrgent: big.NewInt(500_000),
+	}
+
+	// Act
+	result, err := module.Monitor(ctx)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("monitor withdraw liquidity: %v", err)
+	}
+	if result.Status != core.MonitorStatusOK {
+		t.Fatalf("expected ok status, got %s", result.Status)
+	}
+	if len(result.Findings) != 0 {
+		t.Fatalf("expected no findings, got %d", len(result.Findings))
+	}
+}
+
+func TestWithdrawLiquidityModuleReturnsWarnWhenIdleLiquidityEqualsUrgentThreshold(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	owner := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	receiver := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	vault := common.HexToAddress("0x8c106EEDAd96553e64287A5A6839c3Cc78afA3D0")
+	module := WithdrawLiquidityModule{
+		IdleAssetReader: fakeIdleAssetReader{assets: big.NewInt(500_000)},
+		ExitSimulator: &fakeExitSimulator{
+			position: core.PositionSnapshot{
+				Vault:        vault,
+				Owner:        owner,
+				Receiver:     receiver,
+				ShareBalance: big.NewInt(789),
+			},
+			simulation: core.FullExitSimulation{Success: true, ExpectedAssetUnits: big.NewInt(456)},
+		},
+		Owner:      owner,
+		Receiver:   receiver,
+		Vault:      vault,
+		IdleWarn:   big.NewInt(1_000_000),
+		IdleUrgent: big.NewInt(500_000),
+	}
+
+	// Act
+	result, err := module.Monitor(ctx)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("monitor withdraw liquidity: %v", err)
+	}
+	if result.Status != core.MonitorStatusWarn {
+		t.Fatalf("expected warn status, got %s", result.Status)
+	}
+	assertFinding(t, result, core.FindingIdleLiquidity, core.SeverityWarn)
+}
+
 func TestWithdrawLiquidityModuleReturnsUrgentWhenExitSimulationFails(t *testing.T) {
 	// Arrange
 	ctx := context.Background()
@@ -216,6 +293,48 @@ func TestWithdrawLiquidityModuleReturnsUrgentWhenExitSimulationFails(t *testing.
 		t.Fatalf("expected urgent status, got %s", result.Status)
 	}
 	assertFinding(t, result, core.FindingExitSimulation, core.SeverityUrgent)
+}
+
+func TestWithdrawLiquidityModuleReturnsUrgentWhenExitSimulatorReturnsError(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	owner := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	receiver := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	vault := common.HexToAddress("0x8c106EEDAd96553e64287A5A6839c3Cc78afA3D0")
+	module := WithdrawLiquidityModule{
+		IdleAssetReader: fakeIdleAssetReader{assets: big.NewInt(1_500_000)},
+		ExitSimulator: &fakeExitSimulator{
+			position: core.PositionSnapshot{
+				Vault:        vault,
+				Owner:        owner,
+				Receiver:     receiver,
+				ShareBalance: big.NewInt(789),
+			},
+			simulationErr: errors.New("simulation reverted with provider detail"),
+		},
+		Owner:      owner,
+		Receiver:   receiver,
+		Vault:      vault,
+		IdleWarn:   big.NewInt(1_000_000),
+		IdleUrgent: big.NewInt(500_000),
+	}
+
+	// Act
+	result, err := module.Monitor(ctx)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("monitor withdraw liquidity: %v", err)
+	}
+	if result.Status != core.MonitorStatusUrgent {
+		t.Fatalf("expected urgent status, got %s", result.Status)
+	}
+	assertFinding(t, result, core.FindingExitSimulation, core.SeverityUrgent)
+	for _, finding := range result.Findings {
+		if finding.Key == core.FindingExitSimulation && finding.Evidence["error"] != "" {
+			t.Fatalf("expected simulation error detail to stay out of evidence, got %q", finding.Evidence["error"])
+		}
+	}
 }
 
 func assertMetricValue(t *testing.T, result core.MonitorResult, key string, value string, unit string) {
