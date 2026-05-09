@@ -1,0 +1,66 @@
+app:
+  monitor_interval: 5m
+  data_dir: ./data
+
+ethereum:
+  chain_id: 1
+  vault_address: "0x8c106EEDAd96553e64287A5A6839c3Cc78afA3D0"
+  asset_symbol: USDC
+  asset_decimals: 6
+  receiver_address: ""
+
+telegram:
+  chat_id: 0
+  allowed_user_ids: []
+  daily_report_utc_time: "09:00"
+
+gas:
+  replacement_timeout: 2m
+  gas_limit_buffer_bps: 2000
+  fee_bump_bps: 1250
+  max_fee_per_gas_gwei: "200"
+  max_priority_fee_per_gas_gwei: "5"
+
+logs:
+  file_path: ./data/withdraw-bot.log
+  max_size_mb: 20
+  max_backups: 7
+  max_age_days: 30
+
+modules:
+  share_price_loss:
+    enabled: true
+    stale_urgent_after: 30m
+    baseline_share_price_asset_units: "1000000"
+    loss_warn_bps: 50
+    loss_urgent_bps: 100
+  withdraw_liquidity:
+    enabled: true
+    stale_urgent_after: 15m
+    idle_warn_threshold_usdc: "1000000"
+    idle_urgent_threshold_usdc: "500000"
+  vault_state_baseline:
+    enabled: true
+    stale_urgent_after: 30m
+    change_severity: urgent
+    baseline:
+      owner: "0x0000000000000000000000000000000000000000"
+      curator: "0x0000000000000000000000000000000000000000"
+      receive_shares_gate: "0x0000000000000000000000000000000000000000"
+      send_shares_gate: "0x0000000000000000000000000000000000000000"
+      receive_assets_gate: "0x0000000000000000000000000000000000000000"
+      send_assets_gate: "0x0000000000000000000000000000000000000000"
+      adapter_registry: "0x0000000000000000000000000000000000000000"
+      liquidity_adapter: "0x0000000000000000000000000000000000000000"
+      liquidity_data_hex: "0x"
+      performance_fee: "0"
+      performance_fee_recipient: "0x0000000000000000000000000000000000000000"
+      management_fee: "0"
+      management_fee_recipient: "0x0000000000000000000000000000000000000000"
+      max_rate: "0"
+      adapters: []
+      allocator_roles: {}
+      sentinel_roles: {}
+      timelocks: {}
+      abdicated: {}
+      force_deallocate_penalties: {}

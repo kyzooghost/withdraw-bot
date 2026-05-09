@@ -1,0 +1,6 @@
+.env
+.env.local
+data/
+dist/
+withdraw-bot
+*.log

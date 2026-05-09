@@ -1,0 +1,10 @@
+services:
+  withdraw-bot:
+    build: .
+    command: ["monitor", "--config", "/app/config.yaml"]
+    env_file:
+      - .env
+    volumes:
+      - ./config/config.example.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+    restart: unless-stopped
