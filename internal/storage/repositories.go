@@ -15,24 +15,37 @@ const (
 	errPendingConfirmationNotFound = "pending confirmation %q not found"
 	operationBeginConfirmationTx   = "begin pending confirmation transaction"
 	operationCommitConfirmationTx  = "commit pending confirmation transaction"
+	operationDecodeEventFields     = "decode event fields"
 	operationDeleteConfirmation    = "delete pending confirmation"
 	operationInsertConfirmation    = "insert pending confirmation"
+	operationListEvent             = "list event record"
+	operationListRecentEvents      = "list recent events"
 	operationListThresholdOverride = "list threshold override"
 	operationListThresholds        = "list threshold overrides"
+	operationParseEventCreated     = "parse event created_at"
 	operationParseConfirmationTime = "parse pending confirmation %s"
 	operationParseOverrideUpdated  = "parse threshold override updated_at"
 	operationQueryConfirmation     = "query pending confirmation"
 	operationUpsertThreshold       = "upsert threshold override"
-	querySelectConfirmation        = `SELECT id, kind, payload_json, requested_by_user_id, expires_at, created_at FROM pending_confirmations WHERE id = ?`
-	queryDeleteConfirmation        = `DELETE FROM pending_confirmations WHERE id = ?`
-	queryInsertConfirmation        = `INSERT INTO pending_confirmations(id, kind, payload_json, requested_by_user_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`
-	queryListThresholds            = `SELECT module_id, key, value, updated_by_user_id, updated_at FROM threshold_overrides ORDER BY module_id, key`
-	queryUpsertThreshold           = `INSERT INTO threshold_overrides(module_id, key, value, updated_by_user_id, updated_at)
+	queryListRecentEvents          = `SELECT event_type, message, fields_json, created_at FROM event_records ORDER BY created_at DESC LIMIT ?`
+	queryListRecentEventsFiltered  = `SELECT event_type, message, fields_json, created_at FROM event_records
+		 WHERE event_type IN (?, ?, ?, ?)
+		 ORDER BY created_at DESC LIMIT ?`
+	querySelectConfirmation = `SELECT id, kind, payload_json, requested_by_user_id, expires_at, created_at FROM pending_confirmations WHERE id = ?`
+	queryDeleteConfirmation = `DELETE FROM pending_confirmations WHERE id = ?`
+	queryInsertConfirmation = `INSERT INTO pending_confirmations(id, kind, payload_json, requested_by_user_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+	queryListThresholds     = `SELECT module_id, key, value, updated_by_user_id, updated_at FROM threshold_overrides ORDER BY module_id, key`
+	queryUpsertThreshold    = `INSERT INTO threshold_overrides(module_id, key, value, updated_by_user_id, updated_at)
 		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(module_id, key) DO UPDATE SET
 		 value = excluded.value,
 		 updated_by_user_id = excluded.updated_by_user_id,
 		 updated_at = excluded.updated_at`
+)
+
+const (
+	minRecentEventsLimit = 1
+	maxRecentEventsLimit = 50
 )
 
 type Repositories struct {
@@ -54,6 +67,13 @@ type PendingConfirmation struct {
 	RequestedByUserID int64
 	ExpiresAt         time.Time
 	CreatedAt         time.Time
+}
+
+type EventRecord struct {
+	EventType core.EventType
+	Message   string
+	Fields    map[string]string
+	CreatedAt time.Time
 }
 
 func NewRepositories(db *sql.DB) Repositories {
@@ -103,6 +123,42 @@ func (repos Repositories) InsertEvent(ctx context.Context, eventType core.EventT
 		return fmt.Errorf("insert event record: %w", err)
 	}
 	return nil
+}
+
+func (repos Repositories) ListRecentEvents(ctx context.Context, includeInfo bool, limit int) ([]EventRecord, error) {
+	clampedLimit := clampRecentEventsLimit(limit)
+	var rows *sql.Rows
+	var err error
+	if includeInfo {
+		rows, err = repos.DB.QueryContext(ctx, queryListRecentEvents, clampedLimit)
+	} else {
+		rows, err = repos.DB.QueryContext(
+			ctx,
+			queryListRecentEventsFiltered,
+			string(core.EventWarning),
+			string(core.EventError),
+			string(core.EventSecurity),
+			string(core.EventWithdrawal),
+			clampedLimit,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf(operationListRecentEvents+": %w", err)
+	}
+	defer rows.Close()
+
+	events := []EventRecord{}
+	for rows.Next() {
+		event, err := scanEventRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf(operationListRecentEvents+": %w", err)
+	}
+	return events, nil
 }
 
 func (repos Repositories) UpsertThresholdOverride(ctx context.Context, moduleID string, key string, value string, userID int64, at time.Time) error {
@@ -216,4 +272,36 @@ func selectPendingConfirmation(ctx context.Context, tx *sql.Tx, id string) (Pend
 	confirmation.ExpiresAt = parsedExpiresAt
 	confirmation.CreatedAt = parsedCreatedAt
 	return confirmation, nil
+}
+
+func scanEventRecord(rows *sql.Rows) (EventRecord, error) {
+	var event EventRecord
+	var eventType string
+	var fieldsJSON string
+	var createdAt string
+	if err := rows.Scan(&eventType, &event.Message, &fieldsJSON, &createdAt); err != nil {
+		return EventRecord{}, fmt.Errorf(operationListEvent+": %w", err)
+	}
+	fields := map[string]string{}
+	if err := json.Unmarshal([]byte(fieldsJSON), &fields); err != nil {
+		return EventRecord{}, fmt.Errorf(operationDecodeEventFields+": %w", err)
+	}
+	parsedCreatedAt, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return EventRecord{}, fmt.Errorf(operationParseEventCreated+": %w", err)
+	}
+	event.EventType = core.EventType(eventType)
+	event.Fields = fields
+	event.CreatedAt = parsedCreatedAt
+	return event, nil
+}
+
+func clampRecentEventsLimit(limit int) int {
+	if limit < minRecentEventsLimit {
+		return minRecentEventsLimit
+	}
+	if limit > maxRecentEventsLimit {
+		return maxRecentEventsLimit
+	}
+	return limit
 }

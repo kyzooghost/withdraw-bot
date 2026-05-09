@@ -14,6 +14,10 @@ const (
 	testEventFieldKey     = "module"
 	testEventFieldValue   = "share_price_loss"
 	testEventFieldsJSON   = `{"module":"share_price_loss"}`
+	testEventClampMessage = "warning event %02d"
+	testEventInfoMessage  = "monitor tick completed"
+	testEventWarnMessage  = "warning event"
+	testEventErrorMessage = "error event"
 	testMelbourneTimezone = "Australia/Melbourne"
 	testOverrideKey       = "loss_warn_bps"
 	testOverrideOldValue  = "50"
@@ -235,6 +239,123 @@ func TestInsertEventStoresCreatedAtInUTC(t *testing.T) {
 	}
 	if storedCreatedAt != testUTCCreatedAt {
 		t.Fatalf("expected created_at %q, got %q", testUTCCreatedAt, storedCreatedAt)
+	}
+}
+
+func TestListRecentEventsExcludesInfoByDefault(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	repos := NewRepositories(db)
+	older := time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 5, 9, 2, 0, 0, 0, time.UTC)
+	if err := repos.InsertEvent(ctx, core.EventInfo, testEventInfoMessage, nil, newer); err != nil {
+		t.Fatalf("insert info event: %v", err)
+	}
+	if err := repos.InsertEvent(ctx, core.EventWarning, testEventWarnMessage, map[string]string{testEventFieldKey: testEventFieldValue}, older); err != nil {
+		t.Fatalf("insert warning event: %v", err)
+	}
+	if err := repos.InsertEvent(ctx, core.EventError, testEventErrorMessage, nil, newer); err != nil {
+		t.Fatalf("insert error event: %v", err)
+	}
+
+	// Act
+	result, err := repos.ListRecentEvents(ctx, false, 10)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("list recent events: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected two non-info events, got %d", len(result))
+	}
+	if result[0].EventType != core.EventError {
+		t.Fatalf("expected newest error first, got %s", result[0].EventType)
+	}
+	if result[1].EventType != core.EventWarning {
+		t.Fatalf("expected warning second, got %s", result[1].EventType)
+	}
+	if result[1].Fields[testEventFieldKey] != testEventFieldValue {
+		t.Fatalf("expected decoded event fields, got %v", result[1].Fields)
+	}
+}
+
+func TestListRecentEventsIncludesInfoWhenRequested(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	repos := NewRepositories(db)
+	at := time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)
+	if err := repos.InsertEvent(ctx, core.EventInfo, testEventInfoMessage, nil, at); err != nil {
+		t.Fatalf("insert info event: %v", err)
+	}
+	if err := repos.InsertEvent(ctx, core.EventWarning, testEventWarnMessage, nil, at.Add(time.Minute)); err != nil {
+		t.Fatalf("insert warning event: %v", err)
+	}
+
+	// Act
+	result, err := repos.ListRecentEvents(ctx, true, 10)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("list recent events: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected two events, got %d", len(result))
+	}
+	if result[0].EventType != core.EventWarning {
+		t.Fatalf("expected warning first, got %s", result[0].EventType)
+	}
+	if result[1].EventType != core.EventInfo {
+		t.Fatalf("expected info second, got %s", result[1].EventType)
+	}
+}
+
+func TestListRecentEventsClampsLimitToRange(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	repos := NewRepositories(db)
+	start := time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)
+	for index := 0; index < maxRecentEventsLimit+1; index++ {
+		message := fmt.Sprintf(testEventClampMessage, index)
+		if err := repos.InsertEvent(ctx, core.EventWarning, message, nil, start.Add(time.Duration(index)*time.Minute)); err != nil {
+			t.Fatalf("insert warning event %d: %v", index, err)
+		}
+	}
+
+	// Act
+	maxResult, err := repos.ListRecentEvents(ctx, true, maxRecentEventsLimit+1)
+	if err != nil {
+		t.Fatalf("list recent events with high limit: %v", err)
+	}
+	minResult, err := repos.ListRecentEvents(ctx, true, 0)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("list recent events with low limit: %v", err)
+	}
+	if len(maxResult) != maxRecentEventsLimit {
+		t.Fatalf("expected max limit %d, got %d", maxRecentEventsLimit, len(maxResult))
+	}
+	if len(minResult) != minRecentEventsLimit {
+		t.Fatalf("expected min limit %d, got %d", minRecentEventsLimit, len(minResult))
+	}
+	expectedNewestMessage := fmt.Sprintf(testEventClampMessage, maxRecentEventsLimit)
+	if minResult[0].Message != expectedNewestMessage {
+		t.Fatalf("expected low limit to return newest message %q, got %q", expectedNewestMessage, minResult[0].Message)
 	}
 }
 
