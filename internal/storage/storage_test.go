@@ -14,6 +14,12 @@ const (
 	testEventFieldValue   = "share_price_loss"
 	testEventFieldsJSON   = `{"module":"share_price_loss"}`
 	testMelbourneTimezone = "Australia/Melbourne"
+	testOverrideKey       = "loss_warn_bps"
+	testOverrideOldValue  = "50"
+	testOverrideNewValue  = "75"
+	testPendingID         = "threshold:share_price_loss:loss_warn_bps:1"
+	testPendingKind       = "threshold"
+	testPendingPayload    = `{"module_id":"share_price_loss","key":"loss_warn_bps","value":"75"}`
 	testTableEvents       = "event_records"
 	testTableMonitor      = "monitor_snapshots"
 	testTableOverrides    = "threshold_overrides"
@@ -228,5 +234,77 @@ func TestInsertEventStoresCreatedAtInUTC(t *testing.T) {
 	}
 	if storedCreatedAt != testUTCCreatedAt {
 		t.Fatalf("expected created_at %q, got %q", testUTCCreatedAt, storedCreatedAt)
+	}
+}
+
+func TestUpsertThresholdOverrideReplacesExistingValue(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	repos := NewRepositories(db)
+	oldAt := time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)
+	newAt := time.Date(2026, 5, 9, 2, 0, 0, 0, time.UTC)
+
+	// Act
+	if err := repos.UpsertThresholdOverride(ctx, string(core.ModuleSharePriceLoss), testOverrideKey, testOverrideOldValue, 1, oldAt); err != nil {
+		t.Fatalf("upsert old threshold override: %v", err)
+	}
+	if err := repos.UpsertThresholdOverride(ctx, string(core.ModuleSharePriceLoss), testOverrideKey, testOverrideNewValue, 2, newAt); err != nil {
+		t.Fatalf("upsert new threshold override: %v", err)
+	}
+	result, err := repos.ListThresholdOverrides(ctx)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("list threshold overrides: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected one threshold override, got %d", len(result))
+	}
+	if result[0].Value != testOverrideNewValue {
+		t.Fatalf("expected replacement value %q, got %q", testOverrideNewValue, result[0].Value)
+	}
+	if result[0].UpdatedByUserID != 2 {
+		t.Fatalf("expected replacement user id 2, got %d", result[0].UpdatedByUserID)
+	}
+	if !result[0].UpdatedAt.Equal(newAt) {
+		t.Fatalf("expected replacement timestamp %s, got %s", newAt, result[0].UpdatedAt)
+	}
+}
+
+func TestConsumePendingConfirmationReturnsErrorWhenExpired(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	repos := NewRepositories(db)
+	createdAt := time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)
+	expiresAt := time.Date(2026, 5, 9, 1, 5, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 9, 1, 6, 0, 0, time.UTC)
+	confirmation := PendingConfirmation{
+		ID:                testPendingID,
+		Kind:              testPendingKind,
+		PayloadJSON:       testPendingPayload,
+		RequestedByUserID: 1,
+		ExpiresAt:         expiresAt,
+		CreatedAt:         createdAt,
+	}
+	if err := repos.InsertPendingConfirmation(ctx, confirmation); err != nil {
+		t.Fatalf("insert pending confirmation: %v", err)
+	}
+
+	// Act
+	_, err = repos.ConsumePendingConfirmation(ctx, testPendingID, now)
+
+	// Assert
+	if err == nil {
+		t.Fatalf("expected expired pending confirmation error")
 	}
 }
