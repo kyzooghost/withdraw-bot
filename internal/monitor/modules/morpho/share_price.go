@@ -37,6 +37,15 @@ func (module SharePriceModule) ValidateConfig(ctx context.Context) error {
 	if module.BaselineSharePrice == nil || module.BaselineSharePrice.Sign() <= 0 {
 		return fmt.Errorf("%s %s must be positive", core.ModuleSharePriceLoss, sharePriceBaselineConfigKey)
 	}
+	if module.WarnBPS <= 0 {
+		return fmt.Errorf("%s warn threshold must be positive", core.ModuleSharePriceLoss)
+	}
+	if module.UrgentBPS <= 0 {
+		return fmt.Errorf("%s urgent threshold must be positive", core.ModuleSharePriceLoss)
+	}
+	if module.WarnBPS > module.UrgentBPS {
+		return fmt.Errorf("%s warn threshold must be less than or equal to urgent threshold", core.ModuleSharePriceLoss)
+	}
 	if module.Reader == nil {
 		return fmt.Errorf("%s reader is required", core.ModuleSharePriceLoss)
 	}
@@ -56,6 +65,13 @@ func (module SharePriceModule) Monitor(ctx context.Context) (core.MonitorResult,
 	if err != nil {
 		return core.MonitorResult{}, err
 	}
+	if current == nil || current.Sign() <= 0 {
+		return core.MonitorResult{}, fmt.Errorf("%s current share price must be positive", core.ModuleSharePriceLoss)
+	}
+	clock := module.Clock
+	if clock == nil {
+		clock = core.SystemClock{}
+	}
 	baselineLoss := lossBPS(module.BaselineSharePrice, current)
 	previousLoss := int64(0)
 	if module.PreviousSharePrice != nil && module.PreviousSharePrice.Sign() > 0 {
@@ -65,15 +81,31 @@ func (module SharePriceModule) Monitor(ctx context.Context) (core.MonitorResult,
 	findings := []core.Finding{}
 	if baselineLoss >= module.UrgentBPS || previousLoss >= module.UrgentBPS {
 		status = core.MonitorStatusUrgent
-		findings = append(findings, core.Finding{Key: core.FindingSharePriceLoss, Severity: core.SeverityUrgent, Message: "share price loss crossed urgent threshold", Evidence: map[string]string{sharePriceBaselineLossKey: fmt.Sprint(baselineLoss), sharePricePreviousLossKey: fmt.Sprint(previousLoss)}})
+		findings = append(findings, core.Finding{
+			Key:      core.FindingSharePriceLoss,
+			Severity: core.SeverityUrgent,
+			Message:  "share price loss crossed urgent threshold",
+			Evidence: map[string]string{
+				sharePriceBaselineLossKey: fmt.Sprint(baselineLoss),
+				sharePricePreviousLossKey: fmt.Sprint(previousLoss),
+			},
+		})
 	} else if baselineLoss >= module.WarnBPS || previousLoss >= module.WarnBPS {
 		status = core.MonitorStatusWarn
-		findings = append(findings, core.Finding{Key: core.FindingSharePriceLoss, Severity: core.SeverityWarn, Message: "share price loss crossed warn threshold", Evidence: map[string]string{sharePriceBaselineLossKey: fmt.Sprint(baselineLoss), sharePricePreviousLossKey: fmt.Sprint(previousLoss)}})
+		findings = append(findings, core.Finding{
+			Key:      core.FindingSharePriceLoss,
+			Severity: core.SeverityWarn,
+			Message:  "share price loss crossed warn threshold",
+			Evidence: map[string]string{
+				sharePriceBaselineLossKey: fmt.Sprint(baselineLoss),
+				sharePricePreviousLossKey: fmt.Sprint(previousLoss),
+			},
+		})
 	}
 	return core.MonitorResult{
 		ModuleID:   module.ID(),
 		Status:     status,
-		ObservedAt: module.Clock.Now(),
+		ObservedAt: clock.Now(),
 		Metrics:    []core.Metric{{Key: sharePriceMetricKey, Value: current.String(), Unit: sharePriceMetricUnit}},
 		Findings:   findings,
 	}, nil
