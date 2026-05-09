@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math/big"
 	"os"
@@ -28,12 +29,30 @@ const (
 	errInvalidAddress = "%s must be a valid Ethereum address"
 )
 
+type runtimeDependencies struct {
+	loadConfig     func(path string) (config.Config, error)
+	loadSecrets    func() (config.Secrets, error)
+	dialEthereum   func(ctx context.Context, primaryURL string, fallbackURLs []string) (ethereum.MultiClient, error)
+	newSigner      func(privateKeyHex string) (signer.Service, error)
+	openStorage    func(ctx context.Context, path string) (*sql.DB, error)
+	newTelegramBot func(token string) (*tgbotapi.BotAPI, error)
+}
+
+var runtimeDeps = runtimeDependencies{
+	loadConfig:     config.Load,
+	loadSecrets:    config.LoadSecretsFromEnv,
+	dialEthereum:   ethereum.DialMulti,
+	newSigner:      newPrivateKeySigner,
+	openStorage:    storage.Open,
+	newTelegramBot: tgbotapi.NewBotAPI,
+}
+
 func buildRuntime(ctx context.Context, configPath string) (Runtime, error) {
-	cfg, err := config.Load(configPath)
+	cfg, err := runtimeDeps.loadConfig(configPath)
 	if err != nil {
 		return Runtime{}, err
 	}
-	secrets, err := config.LoadSecretsFromEnv()
+	secrets, err := runtimeDeps.loadSecrets()
 	if err != nil {
 		return Runtime{}, err
 	}
@@ -45,14 +64,14 @@ func buildRuntime(ctx context.Context, configPath string) (Runtime, error) {
 	if err != nil {
 		return Runtime{}, err
 	}
-	ethClient, err := ethereum.DialMulti(ctx, secrets.PrimaryRPCURL, secrets.FallbackRPCURLs)
+	ethClient, err := runtimeDeps.dialEthereum(ctx, secrets.PrimaryRPCURL, secrets.FallbackRPCURLs)
 	if err != nil {
 		return Runtime{}, sanitizeRuntimeError(secrets, err)
 	}
 	closeRuntime := func() {
 		ethClient.Close()
 	}
-	signerService, err := signer.NewPrivateKeyService(secrets.PrivateKey)
+	signerService, err := runtimeDeps.newSigner(secrets.PrivateKey)
 	if err != nil {
 		closeRuntime()
 		return Runtime{}, err
@@ -77,68 +96,72 @@ func buildRuntime(ctx context.Context, configPath string) (Runtime, error) {
 		closeRuntime()
 		return Runtime{}, err
 	}
-	if err := os.MkdirAll(cfg.App.DataDir, 0o755); err != nil {
-		closeRuntime()
-		return Runtime{}, fmt.Errorf("create data dir: %w", err)
-	}
-	db, err := storage.Open(ctx, filepath.Join(cfg.App.DataDir, databaseFileName))
-	if err != nil {
-		closeRuntime()
-		return Runtime{}, err
-	}
-	closeRuntime = func() {
-		db.Close()
-		ethClient.Close()
-	}
-	repos := storage.NewRepositories(db)
-	monitorService := monitor.NewService(modules, repos, nil)
-	bot, err := tgbotapi.NewBotAPI(secrets.TelegramToken)
-	if err != nil {
-		closeRuntime()
-		return Runtime{}, sanitizeRuntimeError(secrets, err)
-	}
-	replacementTimeout, err := time.ParseDuration(cfg.Gas.ReplacementTimeout)
-	if err != nil {
-		closeRuntime()
-		return Runtime{}, err
-	}
-	maxFeeCap, err := config.ParseGwei("gas.max_fee_per_gas_gwei", cfg.Gas.MaxFeePerGasGwei)
-	if err != nil {
-		closeRuntime()
-		return Runtime{}, err
-	}
-	maxTipCap, err := config.ParseGwei("gas.max_priority_fee_per_gas_gwei", cfg.Gas.MaxPriorityFeePerGasGwei)
-	if err != nil {
-		closeRuntime()
-		return Runtime{}, err
-	}
-	withdrawService := &withdraw.Service{
-		Adapter:            adapter,
-		Signer:             signerService,
-		ChainID:            big.NewInt(cfg.Ethereum.ChainID),
-		Submitter:          ethClient,
-		GasPolicy:          withdraw.GasPolicy{BumpBPS: cfg.Gas.FeeBumpBPS, MaxFeeCap: maxFeeCap, MaxTipCap: maxTipCap},
-		GasLimitBufferBPS:  cfg.Gas.GasLimitBufferBPS,
-		ReplacementTimeout: replacementTimeout,
-	}
 	runtime := Runtime{
-		Config:   cfg,
-		Secrets:  secrets,
-		Ethereum: ethClient,
-		Signer:   signerService,
-		Receiver: receiver,
-		Modules:  bootstrapModules(modules),
-		Monitor:  monitorService,
-		Telegram: telegram.Service{
-			Bot:           bot,
-			Authorization: telegram.Authorization{ChatID: cfg.Telegram.ChatID, AllowedUserIDs: allowedUserIDs(cfg.Telegram.AllowedUserIDs)},
-			Reports:       reportProvider{monitor: monitorService},
-			Withdraw:      withdrawService,
-		},
-		Output: os.Stdout,
-		Close:  closeRuntime,
+		Config:         cfg,
+		Secrets:        secrets,
+		Ethereum:       ethClient,
+		Submitter:      ethClient,
+		Signer:         signerService,
+		Receiver:       receiver,
+		Modules:        bootstrapModules(modules),
+		MonitorModules: modules,
+		Adapter:        adapter,
+		Output:         os.Stdout,
+		Close:          closeRuntime,
 	}
 	return runtime, nil
+}
+
+func buildMonitorServices(ctx context.Context, runtime *Runtime) (func(), error) {
+	if err := os.MkdirAll(runtime.Config.App.DataDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create data dir: %w", err)
+	}
+	db, err := runtimeDeps.openStorage(ctx, filepath.Join(runtime.Config.App.DataDir, databaseFileName))
+	if err != nil {
+		return nil, err
+	}
+	cleanup := func() {
+		db.Close()
+	}
+	repos := storage.NewRepositories(db)
+	monitorService := monitor.NewService(runtime.MonitorModules, repos, nil)
+	bot, err := runtimeDeps.newTelegramBot(runtime.Secrets.TelegramToken)
+	if err != nil {
+		cleanup()
+		return nil, sanitizeRuntimeError(runtime.Secrets, err)
+	}
+	replacementTimeout, err := time.ParseDuration(runtime.Config.Gas.ReplacementTimeout)
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	maxFeeCap, err := config.ParseGwei("gas.max_fee_per_gas_gwei", runtime.Config.Gas.MaxFeePerGasGwei)
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	maxTipCap, err := config.ParseGwei("gas.max_priority_fee_per_gas_gwei", runtime.Config.Gas.MaxPriorityFeePerGasGwei)
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	withdrawService := &withdraw.Service{
+		Adapter:            runtime.Adapter,
+		Signer:             runtime.Signer,
+		ChainID:            big.NewInt(runtime.Config.Ethereum.ChainID),
+		Submitter:          runtime.Submitter,
+		GasPolicy:          withdraw.GasPolicy{BumpBPS: runtime.Config.Gas.FeeBumpBPS, MaxFeeCap: maxFeeCap, MaxTipCap: maxTipCap},
+		GasLimitBufferBPS:  runtime.Config.Gas.GasLimitBufferBPS,
+		ReplacementTimeout: replacementTimeout,
+	}
+	runtime.Monitor = monitorService
+	runtime.Telegram = telegram.Service{
+		Bot:           bot,
+		Authorization: telegram.Authorization{ChatID: runtime.Config.Telegram.ChatID, AllowedUserIDs: allowedUserIDs(runtime.Config.Telegram.AllowedUserIDs)},
+		Reports:       reportProvider{monitor: monitorService},
+		Withdraw:      withdrawService,
+	}
+	return cleanup, nil
 }
 
 func parseAddress(name string, value string) (common.Address, error) {
@@ -171,6 +194,10 @@ func redactValue(message string, value string) string {
 		return message
 	}
 	return strings.ReplaceAll(message, value, "[REDACTED]")
+}
+
+func newPrivateKeySigner(privateKeyHex string) (signer.Service, error) {
+	return signer.NewPrivateKeyService(privateKeyHex)
 }
 
 func allowedUserIDs(ids []int64) map[int64]bool {

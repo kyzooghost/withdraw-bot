@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/big"
@@ -9,7 +10,10 @@ import (
 	"time"
 
 	"withdraw-bot/internal/config"
+	"withdraw-bot/internal/ethereum"
+	"withdraw-bot/internal/monitor"
 	"withdraw-bot/internal/signer"
+	"withdraw-bot/internal/withdraw"
 
 	"github.com/ethereum/go-ethereum/common"
 	"gopkg.in/yaml.v3"
@@ -29,16 +33,19 @@ const (
 )
 
 type Runtime struct {
-	Config   config.Config
-	Secrets  config.Secrets
-	Ethereum chainIDClient
-	Signer   signer.Service
-	Receiver common.Address
-	Modules  []BootstrapModule
-	Monitor  monitorRunner
-	Telegram telegramRunner
-	Output   io.Writer
-	Close    func()
+	Config         config.Config
+	Secrets        config.Secrets
+	Ethereum       chainIDClient
+	Submitter      ethereum.MultiClient
+	Signer         signer.Service
+	Receiver       common.Address
+	Modules        []BootstrapModule
+	MonitorModules []monitor.Module
+	Adapter        withdraw.MorphoAdapter
+	Monitor        monitorRunner
+	Telegram       telegramRunner
+	Output         io.Writer
+	Close          func()
 }
 
 type chainIDClient interface {
@@ -65,21 +72,30 @@ func Run(ctx context.Context, mode Mode, configPath string) error {
 	if runtime.Close != nil {
 		defer runtime.Close()
 	}
+	var modeErr error
 	switch mode {
 	case ModeMonitor:
-		return runMonitor(ctx, runtime)
+		modeErr = runMonitor(ctx, runtime)
 	case ModeBootstrap:
-		return runBootstrap(ctx, runtime)
+		modeErr = runBootstrap(ctx, runtime)
 	case ModeConfigCheck:
-		return runConfigCheck(ctx, runtime)
+		modeErr = runConfigCheck(ctx, runtime)
 	default:
 		return fmt.Errorf(errUnsupportedMode, mode)
 	}
+	if modeErr != nil {
+		return sanitizeRuntimeError(runtime.Secrets, modeErr)
+	}
+	return nil
 }
 
 func runMonitor(ctx context.Context, runtime Runtime) error {
 	if runtime.Monitor == nil {
-		return fmt.Errorf(errMonitorRequired)
+		cleanup, err := buildMonitorServices(ctx, &runtime)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
 	}
 	if runtime.Telegram == nil {
 		return fmt.Errorf(errTelegramRequired)
@@ -100,15 +116,15 @@ func runMonitor(ctx context.Context, runtime Runtime) error {
 	}()
 	firstErr := <-errCh
 	cancel()
-	secondErr := <-errCh
-	if firstErr != nil {
-		return firstErr
-	}
-	return secondErr
+	return firstErr
 }
 
 func runBootstrap(ctx context.Context, runtime Runtime) error {
 	fragments, err := CollectBootstrapFragments(ctx, runtime.Modules)
+	if err != nil {
+		return sanitizeRuntimeError(runtime.Secrets, err)
+	}
+	normalized, err := normalizeYAMLValue(fragments)
 	if err != nil {
 		return err
 	}
@@ -119,7 +135,19 @@ func runBootstrap(ctx context.Context, runtime Runtime) error {
 	encoder := yaml.NewEncoder(output)
 	encoder.SetIndent(defaultOutputIndent)
 	defer encoder.Close()
-	return encoder.Encode(fragments)
+	return encoder.Encode(normalized)
+}
+
+func normalizeYAMLValue(value any) (any, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var normalized any
+	if err := json.Unmarshal(data, &normalized); err != nil {
+		return nil, err
+	}
+	return normalized, nil
 }
 
 func runConfigCheck(ctx context.Context, runtime Runtime) error {

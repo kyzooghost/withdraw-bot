@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/big"
 
@@ -48,11 +49,20 @@ const (
 	vaultMethodAdapters                         = "adapters"
 	erc20MethodBalanceOf                        = "balanceOf"
 	errMissingModuleConfig                      = "%s module config is required"
+	errUnknownEnabledModule                     = "unknown enabled module %q"
+	errMissingModuleEnabled                     = "%s.enabled is required"
+	errInvalidModuleEnabled                     = "%s.enabled must be a bool"
 	errMissingModuleField                       = "%s.%s is required"
 	errInvalidModuleInteger                     = "%s.%s must be an integer"
 	errInvalidModuleString                      = "%s.%s must be a string"
 	errInvalidVaultOutput                       = "call %s: expected %s"
 )
+
+var knownModuleIDs = map[core.MonitorModuleID]bool{
+	core.ModuleSharePriceLoss:    true,
+	core.ModuleWithdrawLiquidity: true,
+	core.ModuleVaultState:        true,
+}
 
 type vaultReader struct {
 	Ethereum      ethereum.MultiClient
@@ -64,7 +74,14 @@ func buildModules(cfg config.Config, ethClient ethereum.MultiClient, vault commo
 	reader := vaultReader{Ethereum: ethClient, Vault: vault, AssetDecimals: cfg.Ethereum.AssetDecimals}
 	modules := make([]monitor.Module, 0, len(cfg.Modules))
 
-	shareConfig, ok := enabledModuleConfig(cfg, core.ModuleSharePriceLoss)
+	if err := validateModuleConfigs(cfg); err != nil {
+		return nil, err
+	}
+
+	shareConfig, ok, err := enabledModuleConfig(cfg, core.ModuleSharePriceLoss)
+	if err != nil {
+		return nil, err
+	}
 	if ok {
 		module, err := buildSharePriceModule(shareConfig, reader)
 		if err != nil {
@@ -73,7 +90,10 @@ func buildModules(cfg config.Config, ethClient ethereum.MultiClient, vault commo
 		modules = append(modules, module)
 	}
 
-	liquidityConfig, ok := enabledModuleConfig(cfg, core.ModuleWithdrawLiquidity)
+	liquidityConfig, ok, err := enabledModuleConfig(cfg, core.ModuleWithdrawLiquidity)
+	if err != nil {
+		return nil, err
+	}
 	if ok {
 		module, err := buildWithdrawLiquidityModule(cfg, liquidityConfig, reader, adapter, vault, owner, receiver)
 		if err != nil {
@@ -82,7 +102,10 @@ func buildModules(cfg config.Config, ethClient ethereum.MultiClient, vault commo
 		modules = append(modules, module)
 	}
 
-	vaultStateConfig, ok := enabledModuleConfig(cfg, core.ModuleVaultState)
+	vaultStateConfig, ok, err := enabledModuleConfig(cfg, core.ModuleVaultState)
+	if err != nil {
+		return nil, err
+	}
 	if ok {
 		module, err := buildVaultStateModule(vaultStateConfig, reader)
 		if err != nil {
@@ -159,15 +182,45 @@ func buildVaultStateModule(moduleConfig config.ModuleConfig, reader vaultReader)
 	}, nil
 }
 
-func enabledModuleConfig(cfg config.Config, moduleID core.MonitorModuleID) (config.ModuleConfig, bool) {
+func validateModuleConfigs(cfg config.Config) error {
+	for rawID, moduleConfig := range cfg.Modules {
+		moduleID := core.MonitorModuleID(rawID)
+		enabled, err := moduleEnabled(moduleConfig, moduleID)
+		if err != nil {
+			return err
+		}
+		if enabled && !knownModuleIDs[moduleID] {
+			return fmt.Errorf(errUnknownEnabledModule, rawID)
+		}
+	}
+	return nil
+}
+
+func enabledModuleConfig(cfg config.Config, moduleID core.MonitorModuleID) (config.ModuleConfig, bool, error) {
 	moduleConfig, ok := cfg.Modules[string(moduleID)]
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
-	if enabled, ok := moduleConfig[moduleConfigKeyEnabled].(bool); ok && !enabled {
-		return nil, false
+	enabled, err := moduleEnabled(moduleConfig, moduleID)
+	if err != nil {
+		return nil, false, err
 	}
-	return moduleConfig, true
+	if !enabled {
+		return nil, false, nil
+	}
+	return moduleConfig, true, nil
+}
+
+func moduleEnabled(moduleConfig config.ModuleConfig, moduleID core.MonitorModuleID) (bool, error) {
+	value, ok := moduleConfig[moduleConfigKeyEnabled]
+	if !ok {
+		return false, fmt.Errorf(errMissingModuleEnabled, moduleID)
+	}
+	enabled, ok := value.(bool)
+	if !ok {
+		return false, fmt.Errorf(errInvalidModuleEnabled, moduleID)
+	}
+	return enabled, nil
 }
 
 func moduleString(moduleConfig config.ModuleConfig, moduleID core.MonitorModuleID, key string) (string, error) {
@@ -226,7 +279,15 @@ func moduleStruct(moduleConfig config.ModuleConfig, moduleID core.MonitorModuleI
 	if err != nil {
 		return err
 	}
-	if err := yaml.Unmarshal(data, target); err != nil {
+	var intermediate any
+	if err := yaml.Unmarshal(data, &intermediate); err != nil {
+		return err
+	}
+	normalized, err := json.Marshal(intermediate)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(normalized, target); err != nil {
 		return err
 	}
 	return nil
