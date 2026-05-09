@@ -27,6 +27,7 @@ const (
 	moduleConfigKeyIdleWarnThresholdUSDC        = "idle_warn_threshold_usdc"
 	moduleConfigKeyIdleUrgentThresholdUSDC      = "idle_urgent_threshold_usdc"
 	moduleConfigKeyChangeSeverity               = "change_severity"
+	moduleConfigKeyStaleUrgentAfter             = "stale_urgent_after"
 	moduleConfigKeyBaseline                     = "baseline"
 	vaultMethodAsset                            = "asset"
 	vaultMethodTotalAssets                      = "totalAssets"

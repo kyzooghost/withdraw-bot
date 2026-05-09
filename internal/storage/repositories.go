@@ -13,25 +13,26 @@ import (
 )
 
 const (
-	errPendingConfirmationExpired  = "pending confirmation %q expired"
-	errPendingConfirmationNotFound = "pending confirmation %q not found"
-	operationBeginConfirmationTx   = "begin pending confirmation transaction"
-	operationCommitConfirmationTx  = "commit pending confirmation transaction"
-	operationDecodeEventFields     = "decode event fields"
-	operationDeleteConfirmation    = "delete pending confirmation"
-	operationInsertConfirmation    = "insert pending confirmation"
-	operationInsertWithdrawal      = "insert withdrawal attempt"
-	operationListEvent             = "list event record"
-	operationListRecentEvents      = "list recent events"
-	operationListThresholdOverride = "list threshold override"
-	operationListThresholds        = "list threshold overrides"
-	operationParseEventCreated     = "parse event created_at"
-	operationParseConfirmationTime = "parse pending confirmation %s"
-	operationParseOverrideUpdated  = "parse threshold override updated_at"
-	operationQueryConfirmation     = "query pending confirmation"
-	operationUpsertThreshold       = "upsert threshold override"
-	queryListRecentEvents          = `SELECT event_type, message, fields_json, created_at FROM event_records ORDER BY created_at DESC, id DESC LIMIT ?`
-	queryListRecentEventsFiltered  = `SELECT event_type, message, fields_json, created_at FROM event_records
+	errPendingConfirmationExpired        = "pending confirmation %q expired"
+	errPendingConfirmationNotFound       = "pending confirmation %q not found"
+	errPendingConfirmationWrongRequester = "pending confirmation %q was requested by a different user"
+	operationBeginConfirmationTx         = "begin pending confirmation transaction"
+	operationCommitConfirmationTx        = "commit pending confirmation transaction"
+	operationDecodeEventFields           = "decode event fields"
+	operationDeleteConfirmation          = "delete pending confirmation"
+	operationInsertConfirmation          = "insert pending confirmation"
+	operationInsertWithdrawal            = "insert withdrawal attempt"
+	operationListEvent                   = "list event record"
+	operationListRecentEvents            = "list recent events"
+	operationListThresholdOverride       = "list threshold override"
+	operationListThresholds              = "list threshold overrides"
+	operationParseEventCreated           = "parse event created_at"
+	operationParseConfirmationTime       = "parse pending confirmation %s"
+	operationParseOverrideUpdated        = "parse threshold override updated_at"
+	operationQueryConfirmation           = "query pending confirmation"
+	operationUpsertThreshold             = "upsert threshold override"
+	queryListRecentEvents                = `SELECT event_type, message, fields_json, created_at FROM event_records ORDER BY created_at DESC, id DESC LIMIT ?`
+	queryListRecentEventsFiltered        = `SELECT event_type, message, fields_json, created_at FROM event_records
 		 WHERE event_type IN (?, ?, ?, ?)
 		 ORDER BY created_at DESC, id DESC LIMIT ?`
 	querySelectConfirmation = `SELECT id, kind, payload_json, requested_by_user_id, expires_at, created_at FROM pending_confirmations WHERE id = ?`
@@ -264,6 +265,14 @@ func (repos Repositories) InsertPendingConfirmation(ctx context.Context, confirm
 }
 
 func (repos Repositories) ConsumePendingConfirmation(ctx context.Context, id string, at time.Time) (PendingConfirmation, error) {
+	return repos.consumePendingConfirmation(ctx, id, at, 0, false)
+}
+
+func (repos Repositories) ConsumePendingConfirmationForUser(ctx context.Context, id string, userID int64, at time.Time) (PendingConfirmation, error) {
+	return repos.consumePendingConfirmation(ctx, id, at, userID, true)
+}
+
+func (repos Repositories) consumePendingConfirmation(ctx context.Context, id string, at time.Time, userID int64, requireUser bool) (PendingConfirmation, error) {
 	tx, err := repos.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return PendingConfirmation{}, fmt.Errorf(operationBeginConfirmationTx+": %w", err)
@@ -278,6 +287,9 @@ func (repos Repositories) ConsumePendingConfirmation(ctx context.Context, id str
 	confirmation, err := selectPendingConfirmation(ctx, tx, id)
 	if err != nil {
 		return PendingConfirmation{}, err
+	}
+	if requireUser && confirmation.RequestedByUserID != userID {
+		return PendingConfirmation{}, fmt.Errorf(errPendingConfirmationWrongRequester, id)
 	}
 	if _, err := tx.ExecContext(ctx, queryDeleteConfirmation, id); err != nil {
 		return PendingConfirmation{}, fmt.Errorf(operationDeleteConfirmation+": %w", err)

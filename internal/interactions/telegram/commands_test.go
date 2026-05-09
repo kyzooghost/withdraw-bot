@@ -242,6 +242,27 @@ func TestHandleCommandReturnsLogsUsageForUnknownArg(t *testing.T) {
 	}
 }
 
+func TestHandleCommandPassesUserIDToConfirmation(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	thresholds := &recordingThresholdService{fakeThresholdService: fakeThresholdService{confirmed: "confirmed"}}
+	service := Service{
+		Authorization: Authorization{ChatID: 100, AllowedUserIDs: map[int64]bool{42: true}},
+		Thresholds:    thresholds,
+	}
+
+	// Act
+	_, err := service.HandleCommand(ctx, 100, 42, "/confirm abc")
+
+	// Assert
+	if err != nil {
+		t.Fatalf("handle command: %v", err)
+	}
+	if thresholds.confirmUserID != 42 {
+		t.Fatalf("expected confirm user id 42, got %d", thresholds.confirmUserID)
+	}
+}
+
 func TestHandleCommandReturnsHelpResponse(t *testing.T) {
 	// Arrange
 	ctx := context.Background()
@@ -468,7 +489,17 @@ func (service fakeThresholdService) BuildSetConfirmation(ctx context.Context, us
 	return service.confirmation, nil
 }
 
-func (service fakeThresholdService) Confirm(ctx context.Context, id string) (string, error) {
+func (service fakeThresholdService) Confirm(ctx context.Context, userID int64, id string) (string, error) {
+	return service.confirmed, nil
+}
+
+type recordingThresholdService struct {
+	fakeThresholdService
+	confirmUserID int64
+}
+
+func (service *recordingThresholdService) Confirm(ctx context.Context, userID int64, id string) (string, error) {
+	service.confirmUserID = userID
 	return service.confirmed, nil
 }
 

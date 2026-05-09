@@ -135,7 +135,8 @@ func buildMonitorServices(ctx context.Context, runtime *Runtime) (func(), error)
 		db.Close()
 	}
 	repos := storage.NewRepositories(db)
-	monitorService := monitor.NewService(runtime.MonitorModules, repos, nil)
+	monitorModules := withThresholdOverrides(runtime.MonitorModules, repos, runtime.Config.Ethereum.AssetDecimals)
+	monitorService := monitor.NewService(monitorModules, repos, nil)
 	bot, err := runtimeDeps.newTelegramBot(runtime.Secrets.TelegramToken)
 	if err != nil {
 		cleanup()
@@ -172,11 +173,12 @@ func buildMonitorServices(ctx context.Context, runtime *Runtime) (func(), error)
 		Authorization: telegram.Authorization{ChatID: runtime.Config.Telegram.ChatID, AllowedUserIDs: allowedUserIDs(runtime.Config.Telegram.AllowedUserIDs)},
 		Reports:       reportProvider{monitor: monitorService},
 		Withdraw:      withdrawService,
-		Thresholds:    thresholdProvider{repos: repos},
+		Thresholds:    thresholdProvider{repos: repos, config: runtime.Config, assetDecimals: runtime.Config.Ethereum.AssetDecimals},
 		Logs:          eventLogProvider{repos: repos},
 		Events:        repos,
 	}
 	runtime.Monitor = monitorService
+	runtime.MonitorModules = monitorModules
 	runtime.Telegram = telegramService
 	slog.InfoContext(ctx, runtimeMonitorServicesReadyEvent)
 	return cleanup, nil

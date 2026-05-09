@@ -58,7 +58,7 @@ type WithdrawService interface {
 type ThresholdService interface {
 	List(ctx context.Context) (string, error)
 	BuildSetConfirmation(ctx context.Context, userID int64, module string, key string, value string) (string, error)
-	Confirm(ctx context.Context, id string) (string, error)
+	Confirm(ctx context.Context, userID int64, id string) (string, error)
 }
 
 type LogProvider interface {
@@ -151,7 +151,7 @@ func (service Service) dispatch(ctx context.Context, command ParsedCommand, user
 	case string(core.CommandWithdraw):
 		return service.withdraw(ctx)
 	case string(core.CommandConfirm):
-		return service.confirm(ctx, command.Args)
+		return service.confirm(ctx, command.Args, userID)
 	case string(core.CommandThresholds):
 		return service.thresholds(ctx)
 	case string(core.CommandThresholdSet):
@@ -186,14 +186,14 @@ func (service Service) withdraw(ctx context.Context) (string, error) {
 	return fmt.Sprintf(responseWithdrawDryRun, result.Status), nil
 }
 
-func (service Service) confirm(ctx context.Context, args []string) (string, error) {
+func (service Service) confirm(ctx context.Context, args []string, userID int64) (string, error) {
 	if len(args) != 1 {
 		return responseConfirmUsage, nil
 	}
 	if service.Thresholds == nil {
 		return responseConfirmUnavailable, nil
 	}
-	return service.Thresholds.Confirm(ctx, args[0])
+	return service.Thresholds.Confirm(ctx, userID, args[0])
 }
 
 func (service Service) thresholds(ctx context.Context) (string, error) {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"withdraw-bot/internal/config"
 	"withdraw-bot/internal/core"
 	telegramcmd "withdraw-bot/internal/interactions/telegram"
 	"withdraw-bot/internal/storage"
@@ -22,6 +23,9 @@ const (
 	thresholdOverridesEmptyResponse     = "no threshold overrides"
 	thresholdOverridesHeader            = "threshold overrides:"
 	thresholdOverrideLineFormat         = "%s %s=%s by %d at %s"
+	thresholdStaticEmptyResponse        = "no static thresholds"
+	thresholdStaticHeader               = "static thresholds:"
+	thresholdStaticLineFormat           = "%s %s=%v"
 	errPendingConfirmationNotThreshold  = "pending confirmation %q is not a threshold change"
 	eventLogsEmptyResponse              = "no recent events"
 	eventLogLineFormat                  = "%s %s %s"
@@ -33,6 +37,7 @@ const (
 	eventFieldModuleID                  = "module_id"
 	eventFieldThresholdKey              = "key"
 	eventFieldThresholdValue            = "value"
+	eventFieldUserID                    = "user_id"
 )
 
 type eventLogProvider struct {
@@ -60,9 +65,11 @@ func (provider eventLogProvider) Recent(ctx context.Context, includeInfo bool) (
 }
 
 type thresholdProvider struct {
-	repos storage.Repositories
-	clock core.Clock
-	ttl   time.Duration
+	repos         storage.Repositories
+	config        config.Config
+	clock         core.Clock
+	ttl           time.Duration
+	assetDecimals uint8
 }
 
 func (provider thresholdProvider) List(ctx context.Context) (string, error) {
@@ -70,19 +77,27 @@ func (provider thresholdProvider) List(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(overrides) == 0 {
-		return thresholdOverridesEmptyResponse, nil
+	lines := []string{thresholdStaticHeader}
+	staticLines := staticThresholdLines(provider.config)
+	if len(staticLines) == 0 {
+		lines = append(lines, thresholdStaticEmptyResponse)
+	} else {
+		lines = append(lines, staticLines...)
 	}
-	lines := []string{thresholdOverridesHeader}
-	for _, override := range overrides {
-		lines = append(lines, fmt.Sprintf(
-			thresholdOverrideLineFormat,
-			override.ModuleID,
-			override.Key,
-			override.Value,
-			override.UpdatedByUserID,
-			override.UpdatedAt.UTC().Format(time.RFC3339Nano),
-		))
+	lines = append(lines, thresholdOverridesHeader)
+	if len(overrides) == 0 {
+		lines = append(lines, thresholdOverridesEmptyResponse)
+	} else {
+		for _, override := range overrides {
+			lines = append(lines, fmt.Sprintf(
+				thresholdOverrideLineFormat,
+				override.ModuleID,
+				override.Key,
+				override.Value,
+				override.UpdatedByUserID,
+				override.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			))
+		}
 	}
 	return strings.Join(lines, eventLogLineSeparator), nil
 }
@@ -95,6 +110,9 @@ func (provider thresholdProvider) BuildSetConfirmation(ctx context.Context, user
 		UserID:   userID,
 	})
 	if err != nil {
+		return "", err
+	}
+	if err := validateThresholdValue(confirmation.Request.ModuleID, confirmation.Request.Key, confirmation.Request.Value, provider.assetDecimals); err != nil {
 		return "", err
 	}
 	payload, err := json.Marshal(confirmation.Request)
@@ -119,9 +137,9 @@ func (provider thresholdProvider) BuildSetConfirmation(ctx context.Context, user
 	return fmt.Sprintf(thresholdConfirmationResponseFormat, confirmation.Message, core.CommandConfirm, confirmation.ID), nil
 }
 
-func (provider thresholdProvider) Confirm(ctx context.Context, id string) (string, error) {
+func (provider thresholdProvider) Confirm(ctx context.Context, userID int64, id string) (string, error) {
 	now := provider.now()
-	confirmation, err := provider.repos.ConsumePendingConfirmation(ctx, id, now)
+	confirmation, err := provider.repos.ConsumePendingConfirmationForUser(ctx, id, userID, now)
 	if err != nil {
 		return "", err
 	}
@@ -135,6 +153,9 @@ func (provider thresholdProvider) Confirm(ctx context.Context, id string) (strin
 	if _, err := telegramcmd.BuildThresholdConfirmation(request); err != nil {
 		return "", err
 	}
+	if err := validateThresholdValue(request.ModuleID, request.Key, request.Value, provider.assetDecimals); err != nil {
+		return "", err
+	}
 	if err := provider.repos.UpsertThresholdOverride(ctx, request.ModuleID, request.Key, request.Value, confirmation.RequestedByUserID, now); err != nil {
 		return "", err
 	}
@@ -142,6 +163,7 @@ func (provider thresholdProvider) Confirm(ctx context.Context, id string) (strin
 		eventFieldModuleID:       request.ModuleID,
 		eventFieldThresholdKey:   request.Key,
 		eventFieldThresholdValue: request.Value,
+		eventFieldUserID:         fmt.Sprint(userID),
 	}, now); err != nil {
 		return "", err
 	}
@@ -153,6 +175,45 @@ func (provider thresholdProvider) now() time.Time {
 		return core.SystemClock{}.Now()
 	}
 	return provider.clock.Now()
+}
+
+func staticThresholdLines(cfg config.Config) []string {
+	keysByModule := map[core.MonitorModuleID][]string{
+		core.ModuleSharePriceLoss: {
+			moduleConfigKeyLossWarnBPS,
+			moduleConfigKeyLossUrgentBPS,
+			moduleConfigKeyStaleUrgentAfter,
+		},
+		core.ModuleWithdrawLiquidity: {
+			moduleConfigKeyIdleWarnThresholdUSDC,
+			moduleConfigKeyIdleUrgentThresholdUSDC,
+			moduleConfigKeyStaleUrgentAfter,
+		},
+		core.ModuleVaultState: {
+			moduleConfigKeyChangeSeverity,
+			moduleConfigKeyStaleUrgentAfter,
+		},
+	}
+	moduleIDs := []core.MonitorModuleID{
+		core.ModuleSharePriceLoss,
+		core.ModuleWithdrawLiquidity,
+		core.ModuleVaultState,
+	}
+	lines := []string{}
+	for _, moduleID := range moduleIDs {
+		moduleConfig, ok := cfg.Modules[string(moduleID)]
+		if !ok {
+			continue
+		}
+		for _, key := range keysByModule[moduleID] {
+			value, ok := moduleConfig[key]
+			if !ok {
+				continue
+			}
+			lines = append(lines, fmt.Sprintf(thresholdStaticLineFormat, moduleID, key, value))
+		}
+	}
+	return lines
 }
 
 func formatEventRecord(event storage.EventRecord) string {
