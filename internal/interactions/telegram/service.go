@@ -22,6 +22,9 @@ const (
 	errTelegramBotRequiredMessage   = "telegram bot is required"
 	sanitizedSecretValue            = "[REDACTED]"
 	operationGetTelegramUpdates     = "get telegram updates"
+	operationRecordSecurityReject   = "record telegram security reject"
+	operationSendTelegramMessage    = "send telegram message"
+	telegramCommandPrefix           = "/"
 	thresholdSetSubcommand          = "set"
 	logsInfoArg                     = "info"
 	eventFieldChatID                = "chat_id"
@@ -129,7 +132,9 @@ func (service Service) SendCommandResponse(ctx context.Context, msg interactions
 func (service Service) HandleCommand(ctx context.Context, chatID int64, userID int64, text string) (interactions.CommandResponse, error) {
 	parsed := ParseCommand(text)
 	if err := service.Authorization.Check(chatID, userID); err != nil {
-		service.recordSecurityReject(ctx, parsed, chatID, userID)
+		if recordErr := service.recordSecurityReject(ctx, parsed, chatID, userID); recordErr != nil {
+			return interactions.CommandResponse{}, recordErr
+		}
 		return interactions.CommandResponse{}, err
 	}
 	response, err := service.dispatch(ctx, parsed)
@@ -220,7 +225,7 @@ func (service Service) logs(ctx context.Context, args []string) (string, error) 
 }
 
 func (service Service) handleUpdate(ctx context.Context, update tgbotapi.Update) error {
-	if update.Message == nil || update.Message.Chat == nil || update.Message.From == nil || strings.TrimSpace(update.Message.Text) == "" {
+	if update.Message == nil || update.Message.Chat == nil || update.Message.From == nil || !isCommandText(update.Message.Text) {
 		return nil
 	}
 	response, err := service.HandleCommand(ctx, update.Message.Chat.ID, update.Message.From.ID, update.Message.Text)
@@ -271,7 +276,7 @@ func (service Service) sendText(ctx context.Context, chatID int64, text string) 
 	}
 	message := tgbotapi.NewMessage(chatID, boundedText)
 	_, err := service.Bot.Send(message)
-	return err
+	return sanitizeTelegramError(operationSendTelegramMessage, service.Bot.Token, err)
 }
 
 func (service Service) boundResponse(text string) string {
@@ -279,24 +284,32 @@ func (service Service) boundResponse(text string) string {
 	if maxChars <= 0 {
 		maxChars = defaultMaxResponseChars
 	}
-	if len(text) <= maxChars {
+	if len([]rune(text)) <= maxChars {
 		return text
 	}
+	runes := []rune(text)
 	if maxChars <= 3 {
-		return text[:maxChars]
+		return string(runes[:maxChars])
 	}
-	return text[:maxChars-3] + "..."
+	return string(runes[:maxChars-3]) + "..."
 }
 
-func (service Service) recordSecurityReject(ctx context.Context, command ParsedCommand, chatID int64, userID int64) {
+func (service Service) recordSecurityReject(ctx context.Context, command ParsedCommand, chatID int64, userID int64) error {
 	if service.Events == nil {
-		return
+		return nil
 	}
-	_ = service.Events.Record(ctx, core.EventSecurity, securityRejectMessage, map[string]string{
+	if err := service.Events.Record(ctx, core.EventSecurity, securityRejectMessage, map[string]string{
 		eventFieldChatID:  fmt.Sprint(chatID),
 		eventFieldUserID:  fmt.Sprint(userID),
 		eventFieldCommand: sanitizedCommandName(command.Name),
-	}, service.now())
+	}, service.now()); err != nil {
+		return fmt.Errorf("%s: %w", operationRecordSecurityReject, err)
+	}
+	return nil
+}
+
+func isCommandText(text string) bool {
+	return strings.HasPrefix(strings.TrimSpace(text), telegramCommandPrefix)
 }
 
 func sanitizedCommandName(name string) string {

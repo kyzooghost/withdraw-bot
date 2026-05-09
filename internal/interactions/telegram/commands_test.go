@@ -2,11 +2,15 @@ package telegram
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"withdraw-bot/internal/core"
+	"withdraw-bot/internal/interactions"
 	"withdraw-bot/internal/withdraw"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -134,6 +138,27 @@ func TestHandleCommandBoundsLongResponse(t *testing.T) {
 	}
 	if len(result.Text) > 10 {
 		t.Fatalf("expected bounded response, got %d chars", len(result.Text))
+	}
+}
+
+func TestHandleCommandBoundsUTF8Response(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	service := Service{
+		Authorization:    Authorization{ChatID: 100, AllowedUserIDs: map[int64]bool{1: true}},
+		Reports:          fakeReportProvider{stats: "\u00e9\u00e9\u00e9\u00e9\u00e9"},
+		MaxResponseChars: 4,
+	}
+
+	// Act
+	result, err := service.HandleCommand(ctx, 100, 1, string(core.CommandStats))
+
+	// Assert
+	if err != nil {
+		t.Fatalf("handle command: %v", err)
+	}
+	if !utf8.ValidString(result.Text) {
+		t.Fatalf("expected valid UTF-8 response, got %q", result.Text)
 	}
 }
 
@@ -274,6 +299,38 @@ func TestStartHandlesAuthorizedCommandUpdate(t *testing.T) {
 	}
 }
 
+func TestStartIgnoresNonCommandText(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	updates := make(chan tgbotapi.Update, 1)
+	sender := &fakeMessageSender{}
+	service := Service{
+		Authorization: Authorization{ChatID: 100, AllowedUserIDs: map[int64]bool{1: true}},
+		Reports:       fakeReportProvider{stats: "Status: OK"},
+		UpdateSource:  fakeUpdateSource{updates: updates},
+		Sender:        sender,
+	}
+	updates <- tgbotapi.Update{
+		Message: &tgbotapi.Message{
+			From: &tgbotapi.User{ID: 1},
+			Chat: &tgbotapi.Chat{ID: 100},
+			Text: "hello",
+		},
+	}
+	close(updates)
+
+	// Act
+	err := service.Start(ctx)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("start service: %v", err)
+	}
+	if len(sender.messages) != 0 {
+		t.Fatalf("expected no responses, got %d", len(sender.messages))
+	}
+}
+
 func TestStartReturnsCommandHandlerError(t *testing.T) {
 	// Arrange
 	ctx := context.Background()
@@ -305,6 +362,37 @@ func TestStartReturnsCommandHandlerError(t *testing.T) {
 	}
 }
 
+func TestStartReturnsSecurityEventRecordError(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	updates := make(chan tgbotapi.Update, 1)
+	service := Service{
+		Authorization: Authorization{ChatID: 100, AllowedUserIDs: map[int64]bool{1: true}},
+		Events:        &fakeEventRecorder{err: errStatic("record failed")},
+		UpdateSource:  fakeUpdateSource{updates: updates},
+		Sender:        &fakeMessageSender{},
+	}
+	updates <- tgbotapi.Update{
+		Message: &tgbotapi.Message{
+			From: &tgbotapi.User{ID: 2},
+			Chat: &tgbotapi.Chat{ID: 100},
+			Text: string(core.CommandStats),
+		},
+	}
+	close(updates)
+
+	// Act
+	err := service.Start(ctx)
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected security event record error")
+	}
+	if !strings.Contains(err.Error(), "record failed") {
+		t.Fatalf("expected record error, got %v", err)
+	}
+}
+
 func TestSanitizeTelegramErrorRedactsBotToken(t *testing.T) {
 	// Arrange
 	err := errStatic("Post \"https://api.telegram.org/botsecret-token/getUpdates\": timeout")
@@ -318,6 +406,31 @@ func TestSanitizeTelegramErrorRedactsBotToken(t *testing.T) {
 	}
 	if !strings.Contains(result.Error(), "[REDACTED]") {
 		t.Fatalf("expected redacted marker, got %q", result.Error())
+	}
+}
+
+func TestSendCommandResponseRedactsBotTokenFromSendError(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	client := &fakeTelegramHTTPClient{sendErr: errStatic("Post \"https://api.telegram.org/botsecret-token/sendMessage\": timeout")}
+	bot, err := tgbotapi.NewBotAPIWithClient("secret-token", tgbotapi.APIEndpoint, client)
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	service := Service{Bot: bot}
+
+	// Act
+	err = service.SendCommandResponse(ctx, interactions.CommandResponse{ChatID: 100, Text: "hello"})
+
+	// Assert
+	if err == nil {
+		t.Fatal("expected send error")
+	}
+	if strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("expected token to be redacted, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("expected redacted marker, got %q", err.Error())
 	}
 }
 
@@ -380,9 +493,13 @@ type recordedEvent struct {
 
 type fakeEventRecorder struct {
 	events []recordedEvent
+	err    error
 }
 
 func (recorder *fakeEventRecorder) Record(ctx context.Context, eventType core.EventType, message string, fields map[string]string, at time.Time) error {
+	if recorder.err != nil {
+		return recorder.err
+	}
 	recorder.events = append(recorder.events, recordedEvent{eventType: eventType, message: message, fields: fields, at: at})
 	return nil
 }
@@ -413,4 +530,19 @@ type errStatic string
 
 func (err errStatic) Error() string {
 	return string(err)
+}
+
+type fakeTelegramHTTPClient struct {
+	sendErr error
+}
+
+func (client *fakeTelegramHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	if strings.Contains(req.URL.Path, "getMe") {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"bot"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	}
+	return nil, client.sendErr
 }
