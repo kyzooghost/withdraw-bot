@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -16,12 +17,17 @@ import (
 
 const (
 	defaultMaxResponseChars         = 3500
+	defaultUpdateTimeoutSeconds     = 30
 	securityRejectMessage           = "telegram command rejected"
+	errTelegramBotRequiredMessage   = "telegram bot is required"
+	sanitizedSecretValue            = "[REDACTED]"
+	operationGetTelegramUpdates     = "get telegram updates"
 	thresholdSetSubcommand          = "set"
 	logsInfoArg                     = "info"
 	eventFieldChatID                = "chat_id"
 	eventFieldUserID                = "user_id"
 	eventFieldCommand               = "command"
+	sanitizedUnknownCommand         = "unknown"
 	responseStatsUnavailable        = "stats unavailable"
 	responseWithdrawUnavailable     = "withdraw unavailable"
 	responseWithdrawNoop            = "withdraw dry run: no shares to withdraw"
@@ -32,8 +38,11 @@ const (
 	responseThresholdSetUsage       = "usage: /threshold set <module> <key> <value>"
 	responseThresholdSetUnavailable = "threshold updates unavailable"
 	responseLogsUnavailable         = "logs unavailable"
+	responseLogsUsage               = "usage: /logs [info]"
 	responseUnknownCommand          = "unknown command: %s"
 )
+
+var errTelegramBotRequired = errors.New(errTelegramBotRequiredMessage)
 
 type ReportProvider interface {
 	Stats(ctx context.Context) (string, error)
@@ -53,8 +62,18 @@ type LogProvider interface {
 	Recent(ctx context.Context, includeInfo bool) (string, error)
 }
 
+type UpdateSource interface {
+	Updates(ctx context.Context) (<-chan tgbotapi.Update, error)
+}
+
+type MessageSender interface {
+	SendText(ctx context.Context, chatID int64, text string) error
+}
+
 type Service struct {
 	Bot              *tgbotapi.BotAPI
+	UpdateSource     UpdateSource
+	Sender           MessageSender
 	Authorization    Authorization
 	Reports          ReportProvider
 	Withdraw         WithdrawService
@@ -66,19 +85,45 @@ type Service struct {
 }
 
 func (service Service) Start(ctx context.Context) error {
-	return nil
+	if service.UpdateSource != nil {
+		updates, err := service.UpdateSource.Updates(ctx)
+		if err != nil {
+			return err
+		}
+		return service.consumeUpdates(ctx, updates)
+	}
+	if service.Bot == nil {
+		return errTelegramBotRequired
+	}
+	return service.pollBotUpdates(ctx)
+}
+
+func (service Service) consumeUpdates(ctx context.Context, updates <-chan tgbotapi.Update) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case update, ok := <-updates:
+			if !ok {
+				return nil
+			}
+			if err := service.handleUpdate(ctx, update); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func (service Service) SendAlert(ctx context.Context, msg interactions.AlertMessage) error {
-	return service.sendText(service.Authorization.ChatID, msg.Text)
+	return service.sendText(ctx, service.Authorization.ChatID, msg.Text)
 }
 
 func (service Service) SendReport(ctx context.Context, msg interactions.ReportMessage) error {
-	return service.sendText(service.Authorization.ChatID, msg.Text)
+	return service.sendText(ctx, service.Authorization.ChatID, msg.Text)
 }
 
 func (service Service) SendCommandResponse(ctx context.Context, msg interactions.CommandResponse) error {
-	return service.sendText(msg.ChatID, msg.Text)
+	return service.sendText(ctx, msg.ChatID, msg.Text)
 }
 
 func (service Service) HandleCommand(ctx context.Context, chatID int64, userID int64, text string) (interactions.CommandResponse, error) {
@@ -164,6 +209,9 @@ func (service Service) thresholdSet(ctx context.Context, args []string) (string,
 }
 
 func (service Service) logs(ctx context.Context, args []string) (string, error) {
+	if len(args) > 1 || len(args) == 1 && args[0] != logsInfoArg {
+		return responseLogsUsage, nil
+	}
 	if service.Logs == nil {
 		return responseLogsUnavailable, nil
 	}
@@ -171,11 +219,57 @@ func (service Service) logs(ctx context.Context, args []string) (string, error) 
 	return service.Logs.Recent(ctx, includeInfo)
 }
 
-func (service Service) sendText(chatID int64, text string) error {
+func (service Service) handleUpdate(ctx context.Context, update tgbotapi.Update) error {
+	if update.Message == nil || update.Message.Chat == nil || update.Message.From == nil || strings.TrimSpace(update.Message.Text) == "" {
+		return nil
+	}
+	response, err := service.HandleCommand(ctx, update.Message.Chat.ID, update.Message.From.ID, update.Message.Text)
+	if err != nil {
+		if errors.Is(err, errUnauthorizedTelegramCommand) {
+			return nil
+		}
+		return err
+	}
+	if response.Text == "" {
+		return nil
+	}
+	return service.SendCommandResponse(ctx, response)
+}
+
+func (service Service) pollBotUpdates(ctx context.Context) error {
+	config := tgbotapi.NewUpdate(0)
+	config.Timeout = defaultUpdateTimeoutSeconds
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		updates, err := service.Bot.GetUpdates(config)
+		if err != nil {
+			return sanitizeTelegramError(operationGetTelegramUpdates, service.Bot.Token, err)
+		}
+		for _, update := range updates {
+			if update.UpdateID >= config.Offset {
+				config.Offset = update.UpdateID + 1
+			}
+			if err := service.handleUpdate(ctx, update); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (service Service) sendText(ctx context.Context, chatID int64, text string) error {
+	boundedText := service.boundResponse(text)
+	if service.Sender != nil {
+		return service.Sender.SendText(ctx, chatID, boundedText)
+	}
 	if service.Bot == nil {
 		return nil
 	}
-	message := tgbotapi.NewMessage(chatID, service.boundResponse(text))
+	message := tgbotapi.NewMessage(chatID, boundedText)
 	_, err := service.Bot.Send(message)
 	return err
 }
@@ -201,8 +295,34 @@ func (service Service) recordSecurityReject(ctx context.Context, command ParsedC
 	_ = service.Events.Record(ctx, core.EventSecurity, securityRejectMessage, map[string]string{
 		eventFieldChatID:  fmt.Sprint(chatID),
 		eventFieldUserID:  fmt.Sprint(userID),
-		eventFieldCommand: command.Name,
+		eventFieldCommand: sanitizedCommandName(command.Name),
 	}, service.now())
+}
+
+func sanitizedCommandName(name string) string {
+	switch name {
+	case string(core.CommandStats),
+		string(core.CommandWithdraw),
+		string(core.CommandConfirm),
+		string(core.CommandThresholds),
+		string(core.CommandThresholdSet),
+		string(core.CommandLogs),
+		string(core.CommandHelp):
+		return name
+	default:
+		return sanitizedUnknownCommand
+	}
+}
+
+func sanitizeTelegramError(operation string, token string, err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	if token != "" {
+		message = strings.ReplaceAll(message, token, sanitizedSecretValue)
+	}
+	return fmt.Errorf("%s: %s", operation, message)
 }
 
 func (service Service) now() time.Time {

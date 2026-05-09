@@ -1,14 +1,18 @@
 package telegram
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
 
 const (
-	errUnauthorizedChat = "telegram chat %d is not authorized"
-	errUnauthorizedUser = "telegram user %d is not authorized"
+	errUnauthorizedMessage = "telegram authorization failed"
+	errUnauthorizedChat    = "%w: telegram chat %d is not authorized"
+	errUnauthorizedUser    = "%w: telegram user %d is not authorized"
 )
+
+var errUnauthorizedTelegramCommand = errors.New(errUnauthorizedMessage)
 
 type Authorization struct {
 	ChatID         int64
@@ -17,10 +21,10 @@ type Authorization struct {
 
 func (auth Authorization) Check(chatID int64, userID int64) error {
 	if chatID != auth.ChatID {
-		return fmt.Errorf(errUnauthorizedChat, chatID)
+		return fmt.Errorf(errUnauthorizedChat, errUnauthorizedTelegramCommand, chatID)
 	}
 	if !auth.AllowedUserIDs[userID] {
-		return fmt.Errorf(errUnauthorizedUser, userID)
+		return fmt.Errorf(errUnauthorizedUser, errUnauthorizedTelegramCommand, userID)
 	}
 	return nil
 }
