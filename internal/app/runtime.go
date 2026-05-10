@@ -177,6 +177,11 @@ func buildMonitorServices(ctx context.Context, runtime *Runtime) (func(), error)
 		Logs:          eventLogProvider{repos: repos},
 		Events:        repos,
 	}
+	monitorService.ResultHandler = AlertService{
+		Withdrawer: urgentWithdrawer{executor: withdrawService},
+		Notifier:   telegramAlertNotifier{sender: telegramService},
+		Clock:      core.SystemClock{},
+	}
 	runtime.Monitor = monitorService
 	runtime.MonitorModules = monitorModules
 	runtime.Telegram = telegramService

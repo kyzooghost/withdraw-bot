@@ -17,6 +17,7 @@ const moduleIDEvidenceKey = "module_id"
 var (
 	errInvalidMonitorModule = errors.New("invalid monitor module")
 	errMonitorModuleFailure = errors.New("monitor module failure")
+	errMonitorResultHandler = errors.New("monitor result handler failure")
 	errMonitorStorage       = errors.New("monitor storage failure")
 )
 
@@ -27,12 +28,17 @@ type Module interface {
 	Monitor(ctx context.Context) (core.MonitorResult, error)
 }
 
+type ResultHandler interface {
+	HandleMonitorResults(ctx context.Context, results []core.MonitorResult) error
+}
+
 type Service struct {
-	Modules []Module
-	Storage storage.Repositories
-	Clock   core.Clock
-	Latest  map[core.MonitorModuleID]core.MonitorResult
-	mu      sync.RWMutex
+	Modules       []Module
+	Storage       storage.Repositories
+	Clock         core.Clock
+	Latest        map[core.MonitorModuleID]core.MonitorResult
+	ResultHandler ResultHandler
+	mu            sync.RWMutex
 }
 
 func NewService(modules []Module, repos storage.Repositories, clock core.Clock) *Service {
@@ -81,6 +87,11 @@ func (service *Service) RunOnce(ctx context.Context) ([]core.MonitorResult, erro
 		}
 		results = append(results, resultClone.Clone())
 	}
+	if service.ResultHandler != nil && shouldHandleMonitorResults(resultErr) {
+		if err := service.ResultHandler.HandleMonitorResults(ctx, cloneMonitorResults(results)); err != nil {
+			resultErr = errors.Join(resultErr, errMonitorResultHandler, err)
+		}
+	}
 	return results, resultErr
 }
 
@@ -116,9 +127,25 @@ func (service *Service) RunLoop(ctx context.Context, interval time.Duration) err
 }
 
 func isRecoverableMonitorError(err error) bool {
-	return errors.Is(err, errMonitorModuleFailure) &&
-		!errors.Is(err, errInvalidMonitorModule) &&
-		!errors.Is(err, errMonitorStorage)
+	if errors.Is(err, errInvalidMonitorModule) || errors.Is(err, errMonitorStorage) {
+		return false
+	}
+	return errors.Is(err, errMonitorModuleFailure) || errors.Is(err, errMonitorResultHandler)
+}
+
+func shouldHandleMonitorResults(err error) bool {
+	return !errors.Is(err, errInvalidMonitorModule) && !errors.Is(err, errMonitorStorage)
+}
+
+func cloneMonitorResults(results []core.MonitorResult) []core.MonitorResult {
+	if results == nil {
+		return nil
+	}
+	clone := make([]core.MonitorResult, len(results))
+	for index, result := range results {
+		clone[index] = result.Clone()
+	}
+	return clone
 }
 
 func isNilModule(module Module) bool {

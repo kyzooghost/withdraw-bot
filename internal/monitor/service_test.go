@@ -156,6 +156,90 @@ func TestRunOnceClonesReturnedResultsAndSnapshot(t *testing.T) {
 	}
 }
 
+func TestRunOnceHandlesResultsAfterStorage(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	db, err := storage.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	handler := &fakeResultHandler{}
+	module := fakeModule{
+		id: core.ModuleWithdrawLiquidity,
+		result: core.MonitorResult{
+			ModuleID: core.ModuleWithdrawLiquidity,
+			Status:   core.MonitorStatusUrgent,
+			Findings: []core.Finding{{
+				Key:      core.FindingIdleLiquidity,
+				Severity: core.SeverityUrgent,
+				Message:  "idle liquidity urgent",
+				Evidence: map[string]string{"idle_assets": "0"},
+			}},
+		},
+	}
+	service := NewService([]Module{module}, storage.NewRepositories(db), core.FixedClock{Value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)})
+	service.ResultHandler = handler
+
+	// Act
+	results, err := service.RunOnce(ctx)
+	handler.results[0].Findings[0].Evidence["idle_assets"] = "mutated"
+
+	// Assert
+	if err != nil {
+		t.Fatalf("run monitor once: %v", err)
+	}
+	if handler.calls != 1 {
+		t.Fatalf("expected one handler call, got %d", handler.calls)
+	}
+	if len(handler.results) != 1 || handler.results[0].ModuleID != core.ModuleWithdrawLiquidity {
+		t.Fatalf("expected handler to receive withdraw liquidity result, got %+v", handler.results)
+	}
+	if results[0].Findings[0].Evidence["idle_assets"] != "0" {
+		t.Fatalf("expected handler result mutation not to affect returned results, got %q", results[0].Findings[0].Evidence["idle_assets"])
+	}
+}
+
+func TestRunLoopContinuesAfterResultHandlerError(t *testing.T) {
+	// Arrange
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db, err := storage.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	module := fakeModule{
+		id: core.ModuleWithdrawLiquidity,
+		result: core.MonitorResult{
+			ModuleID: core.ModuleWithdrawLiquidity,
+			Status:   core.MonitorStatusOK,
+		},
+	}
+	handler := &flakyResultHandler{cancel: cancel}
+	service := NewService([]Module{module}, storage.NewRepositories(db), core.FixedClock{Value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)})
+	service.ResultHandler = handler
+	errCh := make(chan error, 1)
+
+	// Act
+	go func() {
+		errCh <- service.RunLoop(ctx, time.Millisecond)
+	}()
+
+	// Assert
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected cancellation after handler recovery, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected run loop to stop after cancellation")
+	}
+	if handler.calls < 2 {
+		t.Fatalf("expected handler to run again after first error, got %d call(s)", handler.calls)
+	}
+}
+
 func TestRunOnceReturnsErrorForNilModule(t *testing.T) {
 	// Arrange
 	ctx := context.Background()
@@ -397,4 +481,58 @@ func (module *flakyModule) Monitor(ctx context.Context) (core.MonitorResult, err
 	}
 	module.cancel()
 	return core.MonitorResult{ModuleID: module.id, Status: core.MonitorStatusOK}, nil
+}
+
+type cancelingModule struct {
+	id          core.MonitorModuleID
+	cancelAfter int
+	cancel      context.CancelFunc
+	calls       int
+}
+
+func (module *cancelingModule) ID() core.MonitorModuleID {
+	return module.id
+}
+
+func (module *cancelingModule) ValidateConfig(ctx context.Context) error {
+	return nil
+}
+
+func (module *cancelingModule) Bootstrap(ctx context.Context) (map[string]any, error) {
+	return nil, nil
+}
+
+func (module *cancelingModule) Monitor(ctx context.Context) (core.MonitorResult, error) {
+	module.calls++
+	if module.calls >= module.cancelAfter {
+		module.cancel()
+	}
+	return core.MonitorResult{ModuleID: module.id, Status: core.MonitorStatusOK}, nil
+}
+
+type fakeResultHandler struct {
+	calls   int
+	results []core.MonitorResult
+}
+
+func (handler *fakeResultHandler) HandleMonitorResults(ctx context.Context, results []core.MonitorResult) error {
+	handler.calls++
+	handler.results = results
+	return nil
+}
+
+type flakyResultHandler struct {
+	calls  int
+	cancel context.CancelFunc
+}
+
+func (handler *flakyResultHandler) HandleMonitorResults(ctx context.Context, results []core.MonitorResult) error {
+	handler.calls++
+	if handler.calls == 1 {
+		return errors.New("alert failed")
+	}
+	if handler.cancel != nil {
+		handler.cancel()
+	}
+	return nil
 }

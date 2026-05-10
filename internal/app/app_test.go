@@ -14,9 +14,11 @@ import (
 	"withdraw-bot/internal/core"
 	"withdraw-bot/internal/ethereum"
 	telegramcmd "withdraw-bot/internal/interactions/telegram"
+	"withdraw-bot/internal/monitor"
 	"withdraw-bot/internal/monitor/modules/morpho"
 	"withdraw-bot/internal/signer"
 	"withdraw-bot/internal/storage"
+	"withdraw-bot/internal/withdraw"
 
 	geth "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -32,6 +34,7 @@ const (
 	testRuntimeLogMessage   = "warning event from runtime"
 	testThresholdValue      = "75"
 	testThresholdConfirmID  = "threshold:share_price_loss:loss_warn_bps:1"
+	testRuntimeAdapterID    = "fake"
 )
 
 func TestRunConfigCheckReturnsChainIDMismatch(t *testing.T) {
@@ -360,6 +363,57 @@ func TestBuildMonitorServicesWiresSecurityEventRecorder(t *testing.T) {
 	}
 }
 
+func TestBuildMonitorServicesWiresUrgentResultsToAutoWithdraw(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	owner := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	receiver := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	vault := common.HexToAddress("0x0000000000000000000000000000000000000003")
+	sender := &fakeRuntimeMessageSender{}
+	rpc := &fakeAutoWithdrawRPCClient{
+		chainID:  big.NewInt(1),
+		gasPrice: big.NewInt(1_000_000_000),
+		tipCap:   big.NewInt(100_000_000),
+	}
+	runtime, db := buildTestRuntimeWithMonitorServicesForAutoWithdraw(t, ctx, owner, receiver, vault, rpc)
+	telegramService := runtimeTelegramService(t, runtime)
+	telegramService.Sender = sender
+	monitorService := runtimeMonitorService(t, runtime)
+
+	// Act
+	_, err := monitorService.RunOnce(ctx)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("run monitor once: %v", err)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("expected one Telegram alert, got %d", sender.calls)
+	}
+	if rpc.sent != 1 {
+		t.Fatalf("expected one submitted withdrawal transaction, got %d", rpc.sent)
+	}
+	var triggerKind string
+	var triggerModuleID string
+	var triggerFindingKey string
+	var status string
+	if err := db.QueryRowContext(ctx, `SELECT trigger_kind, trigger_module_id, trigger_finding_key, status FROM withdrawal_attempts`).Scan(&triggerKind, &triggerModuleID, &triggerFindingKey, &status); err != nil {
+		t.Fatalf("query withdrawal attempt: %v", err)
+	}
+	if triggerKind != string(withdraw.TriggerKindUrgent) {
+		t.Fatalf("expected urgent trigger kind, got %q", triggerKind)
+	}
+	if triggerModuleID != string(core.ModuleWithdrawLiquidity) {
+		t.Fatalf("expected trigger module %q, got %q", core.ModuleWithdrawLiquidity, triggerModuleID)
+	}
+	if triggerFindingKey != string(core.FindingIdleLiquidity) {
+		t.Fatalf("expected trigger finding %q, got %q", core.FindingIdleLiquidity, triggerFindingKey)
+	}
+	if status != string(withdraw.WithdrawalStatusSubmitted) {
+		t.Fatalf("expected withdrawal status %q, got %q", withdraw.WithdrawalStatusSubmitted, status)
+	}
+}
+
 type fakeChainClient struct {
 	chainID *big.Int
 }
@@ -529,6 +583,59 @@ func buildTestRuntimeWithMonitorServices(t *testing.T, ctx context.Context) (Run
 	return runtime, db
 }
 
+func buildTestRuntimeWithMonitorServicesForAutoWithdraw(t *testing.T, ctx context.Context, owner common.Address, receiver common.Address, vault common.Address, rpc *fakeAutoWithdrawRPCClient) (Runtime, *sql.DB) {
+	t.Helper()
+	var db *sql.DB
+	withRuntimeDependencies(t, runtimeDependencies{
+		openStorage: func(ctx context.Context, path string) (*sql.DB, error) {
+			var err error
+			db, err = storage.Open(ctx, ":memory:")
+			return db, err
+		},
+		newTelegramBot: func(token string) (*tgbotapi.BotAPI, error) {
+			return &tgbotapi.BotAPI{Token: token}, nil
+		},
+	})
+	cfg := testRuntimeConfig()
+	cfg.App.DataDir = t.TempDir()
+	cfg.Telegram = config.TelegramConfig{ChatID: testTelegramChatID, AllowedUserIDs: []int64{testTelegramAllowedUser}}
+	cfg.Logs = config.LogConfig{FilePath: cfg.App.DataDir + "/withdraw-bot.log", MaxSizeMB: 1, MaxBackups: 1, MaxAgeDays: 1}
+	runtime := Runtime{
+		Config:    cfg,
+		Secrets:   testRuntimeSecrets(),
+		Signer:    fakeRuntimeSigner{address: owner},
+		Submitter: ethereum.NewMultiClient(rpc, nil),
+		Adapter: fakeRuntimeWithdrawAdapter{
+			position: core.PositionSnapshot{
+				Vault:        vault,
+				Owner:        owner,
+				Receiver:     receiver,
+				ShareBalance: big.NewInt(100),
+			},
+			simulation: core.FullExitSimulation{Success: true, ExpectedAssetUnits: big.NewInt(100_000_000), GasUnits: 21_000},
+			candidate:  core.TxCandidate{To: vault, Data: []byte{0x01}, Value: big.NewInt(0)},
+		},
+		MonitorModules: []monitor.Module{fakeRuntimeMonitorModule{
+			id: core.ModuleWithdrawLiquidity,
+			result: core.MonitorResult{
+				ModuleID: core.ModuleWithdrawLiquidity,
+				Status:   core.MonitorStatusUrgent,
+				Findings: []core.Finding{{
+					Key:      core.FindingIdleLiquidity,
+					Severity: core.SeverityUrgent,
+					Message:  "idle liquidity urgent",
+				}},
+			},
+		}},
+	}
+	cleanup, err := buildMonitorServices(ctx, &runtime)
+	if err != nil {
+		t.Fatalf("build monitor services: %v", err)
+	}
+	t.Cleanup(cleanup)
+	return runtime, db
+}
+
 func runtimeTelegramService(t *testing.T, runtime Runtime) *telegramcmd.Service {
 	t.Helper()
 	switch telegramService := runtime.Telegram.(type) {
@@ -538,6 +645,17 @@ func runtimeTelegramService(t *testing.T, runtime Runtime) *telegramcmd.Service 
 		return &telegramService
 	default:
 		t.Fatalf("expected telegram service, got %T", runtime.Telegram)
+		return nil
+	}
+}
+
+func runtimeMonitorService(t *testing.T, runtime Runtime) *monitor.Service {
+	t.Helper()
+	switch monitorService := runtime.Monitor.(type) {
+	case *monitor.Service:
+		return monitorService
+	default:
+		t.Fatalf("expected monitor service, got %T", runtime.Monitor)
 		return nil
 	}
 }
@@ -568,3 +686,97 @@ func withRuntimeDependencies(t *testing.T, deps runtimeDependencies) {
 		runtimeDeps = previous
 	})
 }
+
+type fakeRuntimeMessageSender struct {
+	calls int
+}
+
+func (sender *fakeRuntimeMessageSender) SendText(ctx context.Context, chatID int64, text string) error {
+	sender.calls++
+	return nil
+}
+
+type fakeRuntimeMonitorModule struct {
+	id     core.MonitorModuleID
+	result core.MonitorResult
+}
+
+func (module fakeRuntimeMonitorModule) ID() core.MonitorModuleID {
+	return module.id
+}
+
+func (module fakeRuntimeMonitorModule) ValidateConfig(ctx context.Context) error {
+	return nil
+}
+
+func (module fakeRuntimeMonitorModule) Bootstrap(ctx context.Context) (map[string]any, error) {
+	return nil, nil
+}
+
+func (module fakeRuntimeMonitorModule) Monitor(ctx context.Context) (core.MonitorResult, error) {
+	return module.result, nil
+}
+
+type fakeRuntimeWithdrawAdapter struct {
+	position   core.PositionSnapshot
+	simulation core.FullExitSimulation
+	candidate  core.TxCandidate
+}
+
+func (adapter fakeRuntimeWithdrawAdapter) ID() string {
+	return testRuntimeAdapterID
+}
+
+func (adapter fakeRuntimeWithdrawAdapter) Position(ctx context.Context) (core.PositionSnapshot, error) {
+	return adapter.position.Clone(), nil
+}
+
+func (adapter fakeRuntimeWithdrawAdapter) BuildFullExit(ctx context.Context, req core.FullExitRequest) (core.TxCandidate, error) {
+	return adapter.candidate.Clone(), nil
+}
+
+func (adapter fakeRuntimeWithdrawAdapter) SimulateFullExit(ctx context.Context, req core.FullExitRequest) (core.FullExitSimulation, error) {
+	return adapter.simulation.Clone(), nil
+}
+
+type fakeAutoWithdrawRPCClient struct {
+	chainID  *big.Int
+	gasPrice *big.Int
+	tipCap   *big.Int
+	sent     int
+}
+
+func (client *fakeAutoWithdrawRPCClient) CallContract(ctx context.Context, call geth.CallMsg, blockNumber *big.Int) ([]byte, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (client *fakeAutoWithdrawRPCClient) PendingNonceAt(ctx context.Context, account common.Address) (uint64, error) {
+	return 7, nil
+}
+
+func (client *fakeAutoWithdrawRPCClient) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
+	return new(big.Int).Set(client.gasPrice), nil
+}
+
+func (client *fakeAutoWithdrawRPCClient) SuggestGasTipCap(ctx context.Context) (*big.Int, error) {
+	return new(big.Int).Set(client.tipCap), nil
+}
+
+func (client *fakeAutoWithdrawRPCClient) EstimateGas(ctx context.Context, call geth.CallMsg) (uint64, error) {
+	return 0, errors.New("not implemented")
+}
+
+func (client *fakeAutoWithdrawRPCClient) SendTransaction(ctx context.Context, tx *types.Transaction) error {
+	client.sent++
+	return nil
+}
+
+func (client *fakeAutoWithdrawRPCClient) TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (client *fakeAutoWithdrawRPCClient) ChainID(ctx context.Context) (*big.Int, error) {
+	return new(big.Int).Set(client.chainID), nil
+}
+
+func (client *fakeAutoWithdrawRPCClient) Close() {}

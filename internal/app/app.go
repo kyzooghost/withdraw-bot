@@ -41,7 +41,7 @@ type Runtime struct {
 	Receiver       common.Address
 	Modules        []BootstrapModule
 	MonitorModules []monitor.Module
-	Adapter        withdraw.MorphoAdapter
+	Adapter        withdraw.Adapter
 	Monitor        monitorRunner
 	Telegram       telegramRunner
 	Output         io.Writer
