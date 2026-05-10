@@ -1,6 +1,6 @@
 # withdraw-bot - Agent Guide and Architecture Index
 
-Generated: 2026-05-10
+Generated: 2026-05-11
 
 This is the canonical repo guide for agents working in `withdraw-bot`. It summarizes the codebase, operational model, commands, tests, and local rules that matter before changing code.
 
@@ -17,7 +17,7 @@ Asset:  USDC, 6 decimals
 Exit:   redeem(allShares, receiver, owner)
 ```
 
-Current behavior note: the code contains `internal/app.AlertService` and `withdraw.Service.ExecuteFullExit`, but no runtime call from `monitor.Service.RunLoop` into `AlertService.HandleMonitorResults` was found during the 2026-05-10 discovery. Telegram `/withdraw` currently performs `DryRunFullExit`. Verify runtime wiring before claiming urgent monitor findings automatically broadcast withdrawals.
+Current behavior note: monitor results are wired to `internal/app.AlertService` through `monitor.Service.ResultHandler` in `internal/app/runtime.go`. Urgent findings send a Telegram alert and call `withdraw.Service.ExecuteFullExit`. Telegram `/withdraw` remains a dry run.
 
 ## 2. Architecture
 
@@ -71,6 +71,8 @@ monitor.Service.RunLoop
   -> core.MonitorResult
   -> in-memory latest snapshot
   -> storage.monitor_snapshots
+  -> AlertService.HandleMonitorResults
+  -> urgent Telegram alert and withdraw.Service.ExecuteFullExit
 ```
 
 Telegram command path:
@@ -154,7 +156,7 @@ withdraw.Service.ExecuteFullExit
 
 `internal/ethereum.MultiClient` tries primary then fallback clients for read operations. `SendTransaction` uses the primary RPC only. Keep that distinction unless the product decision changes.
 
-`internal/monitor.Service` runs modules, stores latest snapshots in memory, and persists monitor results. Module failures become `UNKNOWN` results when recoverable enough to continue the loop.
+`internal/monitor.Service` runs modules, stores latest snapshots in memory, persists monitor results, and optionally calls a result handler after successful storage. Module failures become `UNKNOWN` results when recoverable enough to continue the loop.
 
 `internal/monitor/modules/morpho` contains the three monitoring modules:
 
@@ -235,7 +237,9 @@ docker compose build
 docker compose up -d
 ```
 
-No CI workflow, lint config, `justfile`, or repo-provided format target was found during discovery. Use `gofmt` for changed Go files.
+No lint config, `justfile`, or repo-provided format target exists. Use `gofmt` for changed Go files.
+
+GitHub Actions runs `go test ./... -count=1`, `go build ./cmd/withdraw-bot`, and `docker compose config` on pushes to `main` and pull requests.
 
 ## 7. Dependencies
 
@@ -262,7 +266,7 @@ gcr.io/distroless/base-debian12@sha256:9dce90e688a57e59ce473ff7bc4c80bc8fe52d230
 
 ## 8. Test Infrastructure
 
-There are 167 top-level `func Test...` tests across 26 `_test.go` files as of 2026-05-10.
+There are 170 top-level `func Test...` tests across 26 `_test.go` files as of 2026-05-11.
 
 Testing style:
 
@@ -344,12 +348,12 @@ When writing bash scripts, start with:
 set -euo pipefail
 ```
 
-## 11. Known Gaps And Verification Notes
+## 11. Verification Notes
 
-Automatic urgent withdrawal wiring needs verification. `AlertService.HandleMonitorResults` exists and is tested, but the monitor runtime currently starts only Telegram and `Monitor.RunLoop`.
+Automatic urgent withdrawal wiring is covered by `TestBuildMonitorServicesWiresUrgentResultsToAutoWithdraw`. The monitor result-handler retry path is covered by `TestRunLoopContinuesAfterResultHandlerError`.
 
-The implementation plan mentions Go `1.24.0`, but `go.mod` is authoritative and currently declares Go `1.25.7` with toolchain `go1.25.10`.
+The implementation plan and `go.mod` both declare Go `1.25.7` with toolchain `go1.25.10`.
 
-No repository CI config was found. Branch protection or remote rulesets are not visible from the local checkout.
+Repository CI lives at `.github/workflows/go.yml`. Remote branch protection or rulesets are not visible from the local checkout.
 
-The root `withdraw-bot` executable may appear as a local ignored build artifact. Do not stage it.
+The root `withdraw-bot` executable is ignored by `.gitignore`. Do not stage local build artifacts.

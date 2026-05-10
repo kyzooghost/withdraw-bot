@@ -6,7 +6,7 @@
 
 **Architecture:** Implement a single-position modular daemon with protocol-ready interfaces. Core packages own config, storage, Ethereum access, signing, monitoring, withdrawal orchestration, alerts, reports, events, and interaction boundaries. Morpho-specific behavior lives in a withdraw adapter and three monitor modules.
 
-**Tech Stack:** Go `1.24.0` module directive with `toolchain go1.25.10`, `github.com/ethereum/go-ethereum v1.17.2`, `github.com/mattn/go-sqlite3 v1.14.44`, `github.com/pressly/goose/v3 v3.27.1`, `gopkg.in/yaml.v3 v3.0.1`, `github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1`, `gopkg.in/natefinch/lumberjack.v2 v2.2.1`, `github.com/stretchr/testify v1.11.1`, standard `log/slog`.
+**Tech Stack:** Go `1.25.7` module directive with `toolchain go1.25.10`, `github.com/ethereum/go-ethereum v1.17.2`, `github.com/mattn/go-sqlite3 v1.14.44`, `github.com/pressly/goose/v3 v3.27.1`, `gopkg.in/yaml.v3 v3.0.1`, `github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1`, `gopkg.in/natefinch/lumberjack.v2 v2.2.1`, `github.com/stretchr/testify v1.11.1`, standard `log/slog`.
 
 ---
 
@@ -104,7 +104,7 @@ Create `go.mod`:
 ```go
 module withdraw-bot
 
-go 1.24.0
+go 1.25.7
 
 toolchain go1.25.10
 
