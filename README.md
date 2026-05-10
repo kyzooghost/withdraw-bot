@@ -17,3 +17,7 @@ go run ./cmd/withdraw-bot monitor --config config/config.example.yaml
 docker compose build
 docker compose up -d
 ```
+
+## Documentation
+
+See `AGENTS.md` for the architecture index, development workflow, test map, configuration notes, and agent-specific guardrails.
