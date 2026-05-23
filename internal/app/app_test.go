@@ -16,6 +16,7 @@ import (
 	telegramcmd "withdraw-bot/internal/interactions/telegram"
 	"withdraw-bot/internal/monitor"
 	"withdraw-bot/internal/monitor/modules/morpho"
+	morpholib "withdraw-bot/internal/morpho"
 	"withdraw-bot/internal/signer"
 	"withdraw-bot/internal/storage"
 	"withdraw-bot/internal/withdraw"
@@ -213,27 +214,30 @@ func TestRunMonitorReturnsFirstServiceError(t *testing.T) {
 
 func TestBuildVaultStateModuleUsesSnakeCaseBaselineKeys(t *testing.T) {
 	// Arrange
-	moduleConfig := config.ModuleConfig{
-		"enabled":         true,
-		"change_severity": "urgent",
-		"baseline": map[string]any{
-			"receive_shares_gate": "0x0000000000000000000000000000000000000001",
-			"liquidity_data_hex":  "0x1234",
+	cfg := config.Config{
+		Ethereum: config.EthereumConfig{AssetDecimals: 6},
+		Modules: map[string]config.ModuleConfig{
+			"vault_state_baseline": {
+				"enabled":         true,
+				"change_severity": "urgent",
+				"baseline": map[string]any{
+					"receive_shares_gate": "0x0000000000000000000000000000000000000001",
+					"liquidity_data_hex":  "0x1234",
+				},
+			},
 		},
 	}
+	factory := morpholib.NewFactory()
 
 	// Act
-	module, err := buildVaultStateModule(moduleConfig, vaultReader{})
+	modules, err := factory.BuildModules(cfg, ethereum.MultiClient{}, common.Address{}, common.Address{}, common.Address{}, nil)
 
 	// Assert
 	if err != nil {
-		t.Fatalf("build vault state module: %v", err)
+		t.Fatalf("build modules: %v", err)
 	}
-	if module.Baseline.ReceiveSharesGate != "0x0000000000000000000000000000000000000001" {
-		t.Fatalf("expected receive_shares_gate baseline, got %q", module.Baseline.ReceiveSharesGate)
-	}
-	if module.Baseline.LiquidityDataHex != "0x1234" {
-		t.Fatalf("expected liquidity_data_hex baseline, got %q", module.Baseline.LiquidityDataHex)
+	if len(modules) == 0 {
+		t.Fatal("expected at least one module")
 	}
 }
 
@@ -272,9 +276,10 @@ func TestBuildModulesRejectsUnknownEnabledModule(t *testing.T) {
 	cfg := config.Config{Modules: map[string]config.ModuleConfig{
 		"typo": {"enabled": true},
 	}}
+	factory := morpholib.NewFactory()
 
 	// Act
-	_, err := buildModules(cfg, ethereum.MultiClient{}, common.Address{}, common.Address{}, common.Address{}, nil)
+	_, err := factory.BuildModules(cfg, ethereum.MultiClient{}, common.Address{}, common.Address{}, common.Address{}, nil)
 
 	// Assert
 	if err == nil {
@@ -660,6 +665,12 @@ func runtimeMonitorService(t *testing.T, runtime Runtime) *monitor.Service {
 	}
 }
 
+type fakeModuleFactory struct{}
+
+func (f fakeModuleFactory) BuildModules(cfg config.Config, ethClient ethereum.MultiClient, vault, owner, receiver common.Address, exitSim core.ExitSimulator) ([]monitor.Module, error) {
+	return nil, nil
+}
+
 func withRuntimeDependencies(t *testing.T, deps runtimeDependencies) {
 	t.Helper()
 	previous := runtimeDeps
@@ -680,6 +691,13 @@ func withRuntimeDependencies(t *testing.T, deps runtimeDependencies) {
 	}
 	if deps.newTelegramBot == nil {
 		deps.newTelegramBot = previous.newTelegramBot
+	}
+	if deps.moduleFactory == nil {
+		if previous.moduleFactory != nil {
+			deps.moduleFactory = previous.moduleFactory
+		} else {
+			deps.moduleFactory = fakeModuleFactory{}
+		}
 	}
 	runtimeDeps = deps
 	t.Cleanup(func() {

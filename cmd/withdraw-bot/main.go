@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"withdraw-bot/internal/app"
+	"withdraw-bot/internal/morpho"
 )
 
 func main() {
@@ -30,6 +31,8 @@ func run(ctx context.Context, args []string) int {
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
+
+	app.SetModuleFactory(morpho.NewFactory())
 
 	if err := app.Run(ctx, mode, *configPath); err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())

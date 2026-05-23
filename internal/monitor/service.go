@@ -21,12 +21,8 @@ var (
 	errMonitorStorage       = errors.New("monitor storage failure")
 )
 
-type Module interface {
-	ID() core.MonitorModuleID
-	ValidateConfig(ctx context.Context) error
-	Bootstrap(ctx context.Context) (map[string]any, error)
-	Monitor(ctx context.Context) (core.MonitorResult, error)
-}
+// Module is the interface that all protocol monitor modules implement.
+type Module = core.MonitorModule
 
 type ResultHandler interface {
 	HandleMonitorResults(ctx context.Context, results []core.MonitorResult) error

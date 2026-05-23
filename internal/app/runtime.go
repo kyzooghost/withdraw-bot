@@ -34,6 +34,11 @@ const (
 	runtimeMonitorServicesReadyEvent = "monitor services initialized"
 )
 
+// ModuleFactory builds monitor modules for the configured protocol.
+type ModuleFactory interface {
+	BuildModules(cfg config.Config, ethClient ethereum.MultiClient, vault, owner, receiver common.Address, exitSim core.ExitSimulator) ([]monitor.Module, error)
+}
+
 type runtimeDependencies struct {
 	loadConfig     func(path string) (config.Config, error)
 	loadSecrets    func() (config.Secrets, error)
@@ -41,6 +46,7 @@ type runtimeDependencies struct {
 	newSigner      func(privateKeyHex string) (signer.Service, error)
 	openStorage    func(ctx context.Context, path string) (*sql.DB, error)
 	newTelegramBot func(token string) (*tgbotapi.BotAPI, error)
+	moduleFactory  ModuleFactory
 }
 
 var runtimeDeps = runtimeDependencies{
@@ -50,6 +56,12 @@ var runtimeDeps = runtimeDependencies{
 	newSigner:      newPrivateKeySigner,
 	openStorage:    storage.Open,
 	newTelegramBot: tgbotapi.NewBotAPI,
+}
+
+// SetModuleFactory configures the protocol-specific module factory.
+// Must be called before Run.
+func SetModuleFactory(factory ModuleFactory) {
+	runtimeDeps.moduleFactory = factory
 }
 
 func buildRuntime(ctx context.Context, configPath string) (Runtime, error) {
@@ -96,7 +108,7 @@ func buildRuntime(ctx context.Context, configPath string) (Runtime, error) {
 		AssetSymbol:   cfg.Ethereum.AssetSymbol,
 		AssetDecimals: cfg.Ethereum.AssetDecimals,
 	}
-	modules, err := buildModules(cfg, ethClient, vault, signerAddress, receiver, adapter)
+	modules, err := runtimeDeps.moduleFactory.BuildModules(cfg, ethClient, vault, signerAddress, receiver, adapter)
 	if err != nil {
 		closeRuntime()
 		return Runtime{}, err

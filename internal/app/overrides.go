@@ -24,6 +24,14 @@ const (
 	validationOwnerAddress    = "0x0000000000000000000000000000000000000001"
 	validationReceiverAddress = "0x0000000000000000000000000000000000000002"
 	validationVaultAddress    = "0x0000000000000000000000000000000000000003"
+
+	moduleConfigKeyEnabled                 = "enabled"
+	moduleConfigKeyLossWarnBPS             = "loss_warn_bps"
+	moduleConfigKeyLossUrgentBPS           = "loss_urgent_bps"
+	moduleConfigKeyIdleWarnThresholdUSDC   = "idle_warn_threshold_usdc"
+	moduleConfigKeyIdleUrgentThresholdUSDC = "idle_urgent_threshold_usdc"
+	moduleConfigKeyChangeSeverity          = "change_severity"
+	moduleConfigKeyStaleUrgentAfter        = "stale_urgent_after"
 )
 
 type thresholdOverrideModule struct {
@@ -255,11 +263,11 @@ func upsertEffectiveOverride(overrides []storage.ThresholdOverride, request tele
 }
 
 func sharePriceThresholdConfig(moduleConfig config.ModuleConfig) (morphomod.SharePriceModule, error) {
-	warn, err := moduleInt64(moduleConfig, core.ModuleSharePriceLoss, moduleConfigKeyLossWarnBPS)
+	warn, err := config.ModuleInt64(moduleConfig, core.ModuleSharePriceLoss, moduleConfigKeyLossWarnBPS)
 	if err != nil {
 		return morphomod.SharePriceModule{}, err
 	}
-	urgent, err := moduleInt64(moduleConfig, core.ModuleSharePriceLoss, moduleConfigKeyLossUrgentBPS)
+	urgent, err := config.ModuleInt64(moduleConfig, core.ModuleSharePriceLoss, moduleConfigKeyLossUrgentBPS)
 	if err != nil {
 		return morphomod.SharePriceModule{}, err
 	}
@@ -267,11 +275,11 @@ func sharePriceThresholdConfig(moduleConfig config.ModuleConfig) (morphomod.Shar
 }
 
 func withdrawLiquidityThresholdConfig(moduleConfig config.ModuleConfig, assetDecimals uint8) (morphomod.WithdrawLiquidityModule, error) {
-	warn, err := moduleDecimalUnits(moduleConfig, core.ModuleWithdrawLiquidity, moduleConfigKeyIdleWarnThresholdUSDC, assetDecimals)
+	warn, err := config.ModuleDecimalUnits(moduleConfig, core.ModuleWithdrawLiquidity, moduleConfigKeyIdleWarnThresholdUSDC, assetDecimals)
 	if err != nil {
 		return morphomod.WithdrawLiquidityModule{}, err
 	}
-	urgent, err := moduleDecimalUnits(moduleConfig, core.ModuleWithdrawLiquidity, moduleConfigKeyIdleUrgentThresholdUSDC, assetDecimals)
+	urgent, err := config.ModuleDecimalUnits(moduleConfig, core.ModuleWithdrawLiquidity, moduleConfigKeyIdleUrgentThresholdUSDC, assetDecimals)
 	if err != nil {
 		return morphomod.WithdrawLiquidityModule{}, err
 	}
@@ -287,7 +295,7 @@ func withdrawLiquidityThresholdConfig(moduleConfig config.ModuleConfig, assetDec
 }
 
 func vaultStateThresholdConfig(moduleConfig config.ModuleConfig) (morphomod.VaultStateModule, error) {
-	severity, err := moduleString(moduleConfig, core.ModuleVaultState, moduleConfigKeyChangeSeverity)
+	severity, err := config.ModuleString(moduleConfig, core.ModuleVaultState, moduleConfigKeyChangeSeverity)
 	if err != nil {
 		return morphomod.VaultStateModule{}, err
 	}
