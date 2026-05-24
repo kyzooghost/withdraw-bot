@@ -10,6 +10,13 @@ type MonitorModule interface {
 	Monitor(ctx context.Context) (MonitorResult, error)
 }
 
+// ThresholdOverride represents a stored threshold override for a monitor module.
+type ThresholdOverride struct {
+	ModuleID string
+	Key      string
+	Value    string
+}
+
 // ExitSimulator provides position and exit simulation data for monitoring modules.
 type ExitSimulator interface {
 	Position(ctx context.Context) (PositionSnapshot, error)

@@ -11,6 +11,7 @@ import (
 	"withdraw-bot/internal/core"
 	"withdraw-bot/internal/monitor"
 	morphomod "withdraw-bot/internal/monitor/modules/morpho"
+	morpholib "withdraw-bot/internal/morpho"
 	"withdraw-bot/internal/storage"
 )
 
@@ -41,7 +42,7 @@ func TestThresholdOverridesAffectSharePriceMonitorDecision(t *testing.T) {
 		Reader:             fixedSharePriceReader{price: big.NewInt(990)},
 		Clock:              core.FixedClock{Value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)},
 	}
-	wrapped := withThresholdOverrides([]monitor.Module{base}, repos, 6)[0]
+	wrapped := withThresholdOverrides([]monitor.Module{base}, repos, 6, morpholib.NewFactory())[0]
 
 	// Act
 	result, err := wrapped.Monitor(ctx)
@@ -63,7 +64,7 @@ func TestThresholdProviderRejectsInvalidValueBeforeConfirmation(t *testing.T) {
 		t.Fatalf("open database: %v", err)
 	}
 	defer db.Close()
-	provider := thresholdProvider{repos: storage.NewRepositories(db), assetDecimals: 6}
+	provider := thresholdProvider{repos: storage.NewRepositories(db), assetDecimals: 6, factory: morpholib.NewFactory()}
 
 	// Act
 	_, err = provider.BuildSetConfirmation(ctx, testOverrideUserID, string(core.ModuleWithdrawLiquidity), moduleConfigKeyIdleWarnThresholdUSDC, testInvalidThresholdValue)
@@ -82,7 +83,7 @@ func TestThresholdProviderRejectsUnsupportedStaleOverride(t *testing.T) {
 		t.Fatalf("open database: %v", err)
 	}
 	defer db.Close()
-	provider := thresholdProvider{repos: storage.NewRepositories(db), assetDecimals: 6}
+	provider := thresholdProvider{repos: storage.NewRepositories(db), assetDecimals: 6, factory: morpholib.NewFactory()}
 
 	// Act
 	_, err = provider.BuildSetConfirmation(ctx, testOverrideUserID, string(core.ModuleSharePriceLoss), moduleConfigKeyStaleUrgentAfter, "30m")
@@ -108,7 +109,7 @@ func TestThresholdProviderRejectsInvalidEffectiveSharePriceThresholds(t *testing
 			moduleConfigKeyLossUrgentBPS: 100,
 		},
 	}}
-	provider := thresholdProvider{repos: storage.NewRepositories(db), config: cfg, assetDecimals: 6}
+	provider := thresholdProvider{repos: storage.NewRepositories(db), config: cfg, assetDecimals: 6, factory: morpholib.NewFactory()}
 
 	// Act
 	_, err = provider.BuildSetConfirmation(ctx, testOverrideUserID, string(core.ModuleSharePriceLoss), moduleConfigKeyLossWarnBPS, testInvalidOrderingValue)
@@ -137,7 +138,7 @@ func TestThresholdProviderRejectsInvalidEffectiveLiquidityThresholds(t *testing.
 			},
 		},
 	}
-	provider := thresholdProvider{repos: storage.NewRepositories(db), config: cfg, assetDecimals: 6}
+	provider := thresholdProvider{repos: storage.NewRepositories(db), config: cfg, assetDecimals: 6, factory: morpholib.NewFactory()}
 
 	// Act
 	_, err = provider.BuildSetConfirmation(ctx, testOverrideUserID, string(core.ModuleWithdrawLiquidity), moduleConfigKeyIdleWarnThresholdUSDC, "100")
@@ -157,7 +158,7 @@ func TestThresholdProviderRejectsConfirmationFromDifferentUser(t *testing.T) {
 	}
 	defer db.Close()
 	repos := storage.NewRepositories(db)
-	provider := thresholdProvider{repos: repos, assetDecimals: 6, clock: core.FixedClock{Value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)}}
+	provider := thresholdProvider{repos: repos, assetDecimals: 6, clock: core.FixedClock{Value: time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)}, factory: morpholib.NewFactory()}
 	if _, err := provider.BuildSetConfirmation(ctx, testOverrideUserID, string(core.ModuleSharePriceLoss), moduleConfigKeyLossWarnBPS, testStaticThresholdValue); err != nil {
 		t.Fatalf("build threshold confirmation: %v", err)
 	}
@@ -199,7 +200,7 @@ func TestThresholdProviderListIncludesStaticThresholdsAndOverrides(t *testing.T)
 	if err := repos.UpsertThresholdOverride(ctx, string(core.ModuleSharePriceLoss), moduleConfigKeyLossWarnBPS, testThresholdValue, testOverrideUserID, time.Date(2026, 5, 9, 1, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("upsert threshold override: %v", err)
 	}
-	provider := thresholdProvider{repos: repos, config: cfg}
+	provider := thresholdProvider{repos: repos, config: cfg, factory: morpholib.NewFactory()}
 
 	// Act
 	result, err := provider.List(ctx)

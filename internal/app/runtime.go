@@ -37,6 +37,8 @@ const (
 // ModuleFactory builds monitor modules for the configured protocol.
 type ModuleFactory interface {
 	BuildModules(cfg config.Config, ethClient ethereum.MultiClient, vault, owner, receiver common.Address, exitSim core.ExitSimulator) ([]monitor.Module, error)
+	ApplyOverrides(module monitor.Module, overrides []core.ThresholdOverride, assetDecimals uint8) (monitor.Module, error)
+	ValidateThresholdChange(ctx context.Context, moduleID string, key string, value string, moduleConfig config.ModuleConfig, overrides []core.ThresholdOverride, assetDecimals uint8) error
 }
 
 type runtimeDependencies struct {
@@ -147,7 +149,7 @@ func buildMonitorServices(ctx context.Context, runtime *Runtime) (func(), error)
 		db.Close()
 	}
 	repos := storage.NewRepositories(db)
-	monitorModules := withThresholdOverrides(runtime.MonitorModules, repos, runtime.Config.Ethereum.AssetDecimals)
+	monitorModules := withThresholdOverrides(runtime.MonitorModules, repos, runtime.Config.Ethereum.AssetDecimals, runtimeDeps.moduleFactory)
 	monitorService := monitor.NewService(monitorModules, repos, nil)
 	bot, err := runtimeDeps.newTelegramBot(runtime.Secrets.TelegramToken)
 	if err != nil {
@@ -185,7 +187,7 @@ func buildMonitorServices(ctx context.Context, runtime *Runtime) (func(), error)
 		Authorization: telegram.Authorization{ChatID: runtime.Config.Telegram.ChatID, AllowedUserIDs: allowedUserIDs(runtime.Config.Telegram.AllowedUserIDs)},
 		Reports:       reportProvider{monitor: monitorService},
 		Withdraw:      withdrawService,
-		Thresholds:    thresholdProvider{repos: repos, config: runtime.Config, assetDecimals: runtime.Config.Ethereum.AssetDecimals},
+		Thresholds:    thresholdProvider{repos: repos, config: runtime.Config, assetDecimals: runtime.Config.Ethereum.AssetDecimals, factory: runtimeDeps.moduleFactory},
 		Logs:          eventLogProvider{repos: repos},
 		Events:        repos,
 	}

@@ -70,6 +70,7 @@ type thresholdProvider struct {
 	clock         core.Clock
 	ttl           time.Duration
 	assetDecimals uint8
+	factory       ModuleFactory
 }
 
 func (provider thresholdProvider) List(ctx context.Context) (string, error) {
@@ -112,10 +113,7 @@ func (provider thresholdProvider) BuildSetConfirmation(ctx context.Context, user
 	if err != nil {
 		return "", err
 	}
-	if err := validateThresholdValue(confirmation.Request.ModuleID, confirmation.Request.Key, confirmation.Request.Value, provider.assetDecimals); err != nil {
-		return "", err
-	}
-	if err := provider.validateEffectiveThreshold(ctx, telegramThresholdRequest{ModuleID: confirmation.Request.ModuleID, Key: confirmation.Request.Key, Value: confirmation.Request.Value}); err != nil {
+	if err := provider.validateChange(ctx, confirmation.Request.ModuleID, confirmation.Request.Key, confirmation.Request.Value); err != nil {
 		return "", err
 	}
 	payload, err := json.Marshal(confirmation.Request)
@@ -156,10 +154,7 @@ func (provider thresholdProvider) Confirm(ctx context.Context, userID int64, id 
 	if _, err := telegramcmd.BuildThresholdConfirmation(request); err != nil {
 		return "", err
 	}
-	if err := validateThresholdValue(request.ModuleID, request.Key, request.Value, provider.assetDecimals); err != nil {
-		return "", err
-	}
-	if err := provider.validateEffectiveThreshold(ctx, telegramThresholdRequest{ModuleID: request.ModuleID, Key: request.Key, Value: request.Value}); err != nil {
+	if err := provider.validateChange(ctx, request.ModuleID, request.Key, request.Value); err != nil {
 		return "", err
 	}
 	if err := provider.repos.UpsertThresholdOverride(ctx, request.ModuleID, request.Key, request.Value, confirmation.RequestedByUserID, now); err != nil {
@@ -174,6 +169,15 @@ func (provider thresholdProvider) Confirm(ctx context.Context, userID int64, id 
 		return "", err
 	}
 	return fmt.Sprintf(thresholdAppliedResponseFormat, request.ModuleID, request.Key, request.Value), nil
+}
+
+func (provider thresholdProvider) validateChange(ctx context.Context, moduleID string, key string, value string) error {
+	overrides, err := provider.repos.ListThresholdOverrides(ctx)
+	if err != nil {
+		return err
+	}
+	moduleConfig := provider.config.Modules[moduleID]
+	return provider.factory.ValidateThresholdChange(ctx, moduleID, key, value, moduleConfig, toThresholdOverrides(overrides), provider.assetDecimals)
 }
 
 func (provider thresholdProvider) now() time.Time {

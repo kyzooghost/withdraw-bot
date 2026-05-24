@@ -671,6 +671,14 @@ func (f fakeModuleFactory) BuildModules(cfg config.Config, ethClient ethereum.Mu
 	return nil, nil
 }
 
+func (f fakeModuleFactory) ApplyOverrides(module monitor.Module, overrides []core.ThresholdOverride, assetDecimals uint8) (monitor.Module, error) {
+	return module, nil
+}
+
+func (f fakeModuleFactory) ValidateThresholdChange(ctx context.Context, moduleID string, key string, value string, moduleConfig config.ModuleConfig, overrides []core.ThresholdOverride, assetDecimals uint8) error {
+	return nil
+}
+
 func withRuntimeDependencies(t *testing.T, deps runtimeDependencies) {
 	t.Helper()
 	previous := runtimeDeps
